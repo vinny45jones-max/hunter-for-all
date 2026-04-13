@@ -18,7 +18,6 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 # App
 COPY src/ src/
-COPY scripts/ scripts/
 
 # Railway Volume mount point: /data
 # В Railway dashboard: добавить Volume с mount path /data
