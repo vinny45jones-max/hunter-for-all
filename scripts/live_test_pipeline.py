@@ -30,7 +30,7 @@ async def main():
 
     from src.config import settings
     from src.scraper import parse_search_results, get_full_description, close
-    from src.ai_filter import evaluate_relevance
+    from src.ai_filter import evaluate_and_cover
     from src import database as db
 
     # Перезаписать путь к БД для локального теста
@@ -78,13 +78,16 @@ async def main():
         for i, v in enumerate(test_vacancies):
             t0 = time.time()
             try:
-                result = await evaluate_relevance(v)
+                result = await evaluate_and_cover(v)
                 elapsed = time.time() - t0
                 v.relevance_score = result["score"]
                 v.relevance_reason = result["reason"]
+                v.cover_letter = result.get("cover_letter") or ""
                 print(f"  [{i+1}] {v.title}")
                 print(f"      Score: {v.relevance_score}/100 ({elapsed:.1f}s)")
                 print(f"      Reason: {v.relevance_reason}")
+                if v.cover_letter:
+                    print(f"      Cover: {v.cover_letter[:80]}...")
             except Exception as e:
                 print(f"  [{i+1}] FAIL: {e}")
                 v.relevance_score = 0

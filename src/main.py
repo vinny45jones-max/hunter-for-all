@@ -32,7 +32,7 @@ async def main():
         pipeline.run_pipeline,
         "interval",
         minutes=settings.scrape_interval_minutes,
-        next_run_time=datetime.now(),
+        # next_run_time=datetime.now(),  # не запускать при старте
         id="vacancy_pipeline",
         name="Vacancy Pipeline",
     )

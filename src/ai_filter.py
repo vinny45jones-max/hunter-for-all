@@ -7,13 +7,28 @@ import anthropic
 from src.config import settings, log
 from src.models import Vacancy, Message
 
-_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+_client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=5)
 MODEL = "claude-sonnet-4-20250514"
 
 SYSTEM_PROMPT = (
     "Ты -- рекрутер-аналитик. Оцениваешь релевантность вакансии для кандидата. "
     "Отвечай ТОЛЬКО валидным JSON без markdown-блоков."
 )
+
+BATCH_EVALUATE_PROMPT = """
+ПРОФИЛЬ КАНДИДАТА — Роман Комолов:
+- Director of Business Development | Commercial Transformation & AI Integration Specialist
+- 15+ лет на позициях CEO, COO, CCO, коммерческий директор
+- Отрасли: B2B оптовая торговля, дистрибуция, производство, ритейл, e-commerce
+- Компетенции: Business Development, P&L management, AI-интеграция, CRM, Change Management
+
+Оцени каждую вакансию по названию и компании (0-100).
+Отвечай ТОЛЬКО JSON-массивом, без пояснений:
+[{{"id": 0, "score": <int>}}, {{"id": 1, "score": <int>}}, ...]
+
+ВАКАНСИИ:
+{vacancies_block}
+"""
 
 EVALUATE_PROMPT = """
 ПРОФИЛЬ КАНДИДАТА — Роман Комолов:
@@ -49,11 +64,15 @@ EVALUATE_PROMPT = """
 Город: {city}
 Описание: {description}
 
-ОЦЕНИ:
-1. score (0-100) -- насколько вакансия подходит кандидату
-2. reason -- почему, 1-2 предложения
-
-JSON: {{"score": <int>, "reason": "<str>"}}
+ЗАДАЧИ:
+1. Оцени вакансию: score (0-100) и reason (1-2 предложения)
+2. Если score >= {min_score} — напиши сопроводительное письмо (3-5 предложений):
+   - Тон: уверенный, конкретный, без воды. Русский язык.
+   - Не начинай с "Уважаемый". Сразу к делу.
+   - Покажи конкретную ценность для этой компании.
+   Если score < {min_score} — cover_letter = null.
+{requirements_block}
+JSON: {{"score": <int>, "reason": "<str>", "cover_letter": "<str> или null"}}
 """
 
 COVER_LETTER_PROMPT = """
@@ -134,40 +153,93 @@ def _parse_json(text: str) -> dict:
     # Fallback: regex
     score_match = re.search(r'"score"\s*:\s*(\d+)', text)
     reason_match = re.search(r'"reason"\s*:\s*"([^"]+)"', text)
+    cover_match = re.search(r'"cover_letter"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
     if score_match:
-        return {
+        result = {
             "score": int(score_match.group(1)),
             "reason": reason_match.group(1) if reason_match else "N/A",
         }
+        if cover_match:
+            result["cover_letter"] = cover_match.group(1).replace("\\n", "\n")
+        return result
     raise ValueError(f"Cannot parse JSON from: {text[:200]}")
 
 
-async def evaluate_relevance(vacancy: Vacancy) -> dict:
+async def batch_evaluate_titles(vacancies: List[Vacancy], batch_size: int = 30) -> dict[int, int]:
+    """Быстрая оценка по названию+компания батчами. Возвращает {index: score}."""
+    all_scores = {}
+
+    for start in range(0, len(vacancies), batch_size):
+        batch = vacancies[start:start + batch_size]
+        lines = []
+        for i, v in enumerate(batch):
+            idx = start + i
+            lines.append(f"{idx}. {v.title} | {v.company or 'N/A'} | {v.salary or 'N/A'}")
+
+        prompt = BATCH_EVALUATE_PROMPT.format(vacancies_block="\n".join(lines))
+
+        try:
+            response = await _client.messages.create(
+                model=MODEL,
+                max_tokens=2000,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            # Убрать markdown
+            if text.startswith("```"):
+                text = re.sub(r"^```(?:json)?\s*", "", text)
+                text = re.sub(r"\s*```$", "", text)
+
+            results = json.loads(text)
+            for item in results:
+                all_scores[int(item["id"])] = max(0, min(100, int(item["score"])))
+
+            log.info(f"Batch {start}-{start+len(batch)}: оценено {len(results)} вакансий")
+        except Exception as e:
+            log.warning(f"Batch evaluate error: {e}")
+            # При ошибке даём средний балл чтобы не потерять вакансии
+            for i in range(start, start + len(batch)):
+                all_scores[i] = 40
+
+    return all_scores
+
+
+async def evaluate_and_cover(vacancy: Vacancy, min_score: int = 60) -> dict:
+    """Оценка + cover letter в одном вызове. Возвращает {score, reason, cover_letter}."""
+    req_block = ""
+    if hasattr(vacancy, '_requirements') and vacancy._requirements:
+        items = "\n".join(f"- {r}" for r in vacancy._requirements)
+        req_block = f"\nТребования работодателя к письму:\n{items}\nОбязательно ответь на каждое требование.\n"
+
     prompt = EVALUATE_PROMPT.format(
         title=vacancy.title,
         company=vacancy.company or "Не указана",
         salary=vacancy.salary or "Не указана",
         city=vacancy.city or "Не указан",
         description=(vacancy.description or "")[:3000],
+        min_score=min_score,
+        requirements_block=req_block,
     )
 
     for attempt in range(2):
         try:
             response = await _client.messages.create(
                 model=MODEL,
-                max_tokens=300,
+                max_tokens=800,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.content[0].text
             result = _parse_json(text)
             result["score"] = max(0, min(100, int(result.get("score", 0))))
+            result.setdefault("cover_letter", None)
             return result
         except Exception as e:
             log.warning(f"AI evaluate attempt {attempt + 1} failed: {e}")
             if attempt == 0:
                 continue
-            return {"score": 0, "reason": f"AI error: {e}"}
+            return {"score": 0, "reason": f"AI error: {e}", "cover_letter": None}
 
 
 async def generate_cover_letter(

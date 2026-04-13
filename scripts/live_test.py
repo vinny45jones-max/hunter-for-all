@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.models import Vacancy
-from src.ai_filter import evaluate_relevance, generate_cover_letter
+from src.ai_filter import evaluate_and_cover
 
 
 # ─── Тестовые вакансии ─────────────────────────────
@@ -143,21 +143,18 @@ async def main():
         t0 = time.time()
 
         try:
-            result = await evaluate_relevance(v)
+            result = await evaluate_and_cover(v, min_score=60)
             elapsed = time.time() - t0
             score = result["score"]
             reason = result["reason"]
+            cover = result.get("cover_letter")
 
             emoji = "🟢" if score >= 70 else "🟡" if score >= 40 else "🔴"
             print(f"  {emoji} Score: {score}/100  ({elapsed:.1f}s)")
             print(f"  Reason: {reason}")
 
-            # Генерировать cover letter только для релевантных
-            if score >= 60:
-                print(f"  Генерация сопроводительного...")
-                t1 = time.time()
-                cover = await generate_cover_letter(v)
-                print(f"  Cover letter ({time.time() - t1:.1f}s):")
+            if cover:
+                print(f"  Cover letter:")
                 for line in cover.split("\n"):
                     print(f"    | {line}")
 

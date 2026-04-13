@@ -22,21 +22,21 @@ async def main():
     os.makedirs("data", exist_ok=True)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.chromium.launch(headless=False, channel="chrome")
         context = await browser.new_context()
         page = await context.new_page()
 
         await page.goto("https://rabota.by")
 
         print("=" * 50)
-        print("Залогинься на rabota.by в открывшемся браузере.")
-        print("После логина нажми Enter в консоли.")
+        print("Log in to rabota.by in the opened browser.")
+        print("Then press Enter here.")
         print("=" * 50)
 
-        input("Нажми Enter когда залогинился... ")
+        input("Press Enter when logged in... ")
 
         await context.storage_state(path="data/rabota_session.json")
-        print("Сессия сохранена в data/rabota_session.json")
+        print("Session saved to data/rabota_session.json")
 
         await browser.close()
 

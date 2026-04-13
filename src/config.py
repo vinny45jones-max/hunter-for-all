@@ -27,10 +27,10 @@ class Settings(BaseSettings):
     search_queries: str = "директор,CEO,AI"
     search_city: str = "Минск"
     search_area_id: int = 16  # rabota.by area code: 16=Минск, 1002=Беларусь
-    min_relevance_score: int = 60
+    min_relevance_score: int = 50
     scrape_interval_minutes: int = 30
     message_check_interval_minutes: int = 5
-    max_pages: int = 3
+    max_pages: int = 1
 
     # Пути (Railway Volume монтируется в /data)
     db_path: str = "/data/hunter.db"

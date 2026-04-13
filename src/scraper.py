@@ -172,6 +172,10 @@ async def parse_search_results(keyword: str, max_pages: int = None) -> List[Vaca
 
 
 async def get_full_description(url: str) -> Optional[str]:
+    # Пропускаем ссылки на hh.ru — они всегда таймаутят
+    if "hh.ru" in url:
+        return None
+
     browser = await get_browser()
     context = await browser.new_context(
         user_agent=(
@@ -182,7 +186,7 @@ async def get_full_description(url: str) -> Optional[str]:
     )
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=10000)
         await _random_delay(1.0, 2.5)
 
         desc_el = await page.query_selector(SELECTORS["full_description"])

@@ -4,11 +4,31 @@ import random
 from src.config import settings, log
 from src import database, scraper, ai_filter, bot, inbox
 
+# Стоп-слова — вакансии с этими словами в названии отсекаются сразу
+STOP_WORDS = [
+    "магазин", "школ", "детский сад", "аптек", "медсестр", "повар",
+    "кассир", "уборщ", "охранник", "водитель", "грузчик", "сторож",
+    "воспитатель", "учитель", "преподаватель", "фармацевт", "санитар",
+    "медицинск", "стоматолог", "ветеринар", "парикмахер", "маникюр",
+    "продавец", "кладовщик", "слесарь", "сварщик", "электрик",
+    "сантехник", "плотник", "токар", "фрезеровщик",
+]
+
+# Порог быстрой оценки — вакансии выше него идут на полную проверку
+BATCH_THRESHOLD = 40
+
+
+def _passes_stop_words(title: str) -> bool:
+    title_lower = title.lower()
+    return not any(word in title_lower for word in STOP_WORDS)
+
 
 async def run_pipeline():
     log.info("Pipeline: starting vacancy scan...")
 
     try:
+        await bot.send_text("🔍 Начинаю поиск вакансий...")
+
         # 1. Скрапинг
         all_vacancies = await scraper.parse_all_keywords()
 
@@ -16,35 +36,80 @@ async def run_pipeline():
         new_vacancies = await database.filter_new(all_vacancies)
         if not new_vacancies:
             log.info("Pipeline: no new vacancies")
+            await bot.send_text("Новых вакансий не найдено.")
             return
 
-        log.info(f"Pipeline: {len(new_vacancies)} new vacancies to process")
+        log.info(f"Pipeline: {len(new_vacancies)} new vacancies found")
 
-        # 3. Получить полные описания
-        for v in new_vacancies:
+        # 3. Стоп-слова фильтр
+        before_stop = len(new_vacancies)
+        new_vacancies = [v for v in new_vacancies if _passes_stop_words(v.title)]
+        filtered_out = before_stop - len(new_vacancies)
+        if filtered_out:
+            log.info(f"Pipeline: стоп-слова отсекли {filtered_out} вакансий")
+
+        if not new_vacancies:
+            await bot.send_text("Новых подходящих вакансий не найдено (все отсечены стоп-словами).")
+            return
+
+        await bot.send_text(
+            f"Найдено {len(all_vacancies)} вакансий, {len(new_vacancies)} новых "
+            f"(отсечено стоп-словами: {filtered_out}). Быстрая оценка..."
+        )
+
+        # 4. Батч-оценка по названиям (быстрая, без описаний)
+        try:
+            batch_scores = await ai_filter.batch_evaluate_titles(new_vacancies)
+        except Exception as e:
+            log.error(f"Pipeline: батч-оценка упала: {e}")
+            await bot.send_text(f"⚠️ Ошибка AI при быстрой оценке: {e}")
+            return
+        promising = []
+        for i, v in enumerate(new_vacancies):
+            score = batch_scores.get(i, 0)
+            v.relevance_score = score
+            if score >= BATCH_THRESHOLD:
+                promising.append(v)
+            else:
+                # Сохранить отсечённые с низким баллом
+                v.relevance_reason = f"Быстрая оценка: {score}"
+                await database.save_vacancy(v)
+
+        log.info(f"Pipeline: батч-оценка — {len(promising)} перспективных из {len(new_vacancies)}")
+
+        if not promising:
+            await bot.send_text("После быстрой оценки подходящих вакансий не найдено.")
+            return
+
+        await bot.send_text(f"Перспективных: {len(promising)}. Загружаю описания...")
+
+        # 5. Загрузить описания только для перспективных
+        for v in promising:
             try:
                 v.description = await scraper.get_full_description(v.url)
-                await asyncio.sleep(random.uniform(2, 4))
+                await asyncio.sleep(random.uniform(1, 2))
             except Exception as e:
                 log.warning(f"Pipeline: failed to get description for {v.url}: {e}")
 
-        # 4. AI-оценка
-        for v in new_vacancies:
+        # 6. Полная AI-оценка с описанием + cover letter (один вызов)
+        await bot.send_text(f"Оцениваю {len(promising)} вакансий с описаниями...")
+        for v in promising:
             try:
-                result = await ai_filter.evaluate_relevance(v)
+                result = await ai_filter.evaluate_and_cover(v, settings.min_relevance_score)
                 v.relevance_score = result["score"]
                 v.relevance_reason = result["reason"]
 
-                if v.relevance_score >= settings.min_relevance_score:
-                    v.cover_letter = await ai_filter.generate_cover_letter(v)
+                if v.relevance_score >= settings.min_relevance_score and result.get("cover_letter"):
+                    v.cover_letter = result["cover_letter"]
                     v.status = "filtered"
             except Exception as e:
                 log.warning(f"Pipeline: AI filter error for {v.title}: {e}")
+                await bot.send_text(f"⚠️ Ошибка AI для «{v.title}»: {type(e).__name__}")
 
             await database.save_vacancy(v)
 
-        # 5. Отправить в Telegram
-        relevant = [v for v in new_vacancies if v.status == "filtered"]
+        # 7. Отправить в Telegram
+        relevant = [v for v in promising if v.status == "filtered"]
         for v in relevant:
             try:
                 await bot.send_vacancy_card(v)
@@ -52,7 +117,7 @@ async def run_pipeline():
             except Exception as e:
                 log.error(f"Pipeline: TG send error for {v.title}: {e}")
 
-        # 6. Лог
+        # 8. Лог
         await database.save_search_log(
             query=",".join(settings.search_keywords),
             total=len(all_vacancies),
@@ -62,13 +127,19 @@ async def run_pipeline():
 
         log.info(
             f"Pipeline: done. "
-            f"Total={len(all_vacancies)}, new={len(new_vacancies)}, relevant={len(relevant)}"
+            f"Total={len(all_vacancies)}, new={len(new_vacancies)}, "
+            f"promising={len(promising)}, relevant={len(relevant)}"
+        )
+        await bot.send_text(
+            f"✅ Поиск завершён.\n"
+            f"Всего: {len(all_vacancies)}, новых: {len(new_vacancies)}, "
+            f"перспективных: {len(promising)}, подходящих: {len(relevant)}"
         )
 
     except Exception as e:
         log.error(f"Pipeline error: {e}")
         try:
-            await bot.send_text(f"Pipeline error: {e}")
+            await bot.send_text(f"⚠️ Ошибка пайплайна: {e}")
         except Exception:
             pass
 
