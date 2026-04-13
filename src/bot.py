@@ -619,13 +619,13 @@ def create_app() -> Application:
 
     _app.add_handler(cover_edit_conv)
 
-    # Commands
-    _app.add_handler(CommandHandler("start", cmd_start))
-    _app.add_handler(CommandHandler("stats", cmd_stats))
-    _app.add_handler(CommandHandler("last", cmd_last))
-    _app.add_handler(CommandHandler("search", cmd_search))
-    _app.add_handler(CommandHandler("inbox", cmd_inbox))
-    _app.add_handler(CommandHandler("threads", cmd_threads))
+    # Commands — группа -1 чтобы обрабатывались до ConversationHandler
+    _app.add_handler(CommandHandler("start", cmd_start), group=-1)
+    _app.add_handler(CommandHandler("stats", cmd_stats), group=-1)
+    _app.add_handler(CommandHandler("last", cmd_last), group=-1)
+    _app.add_handler(CommandHandler("search", cmd_search), group=-1)
+    _app.add_handler(CommandHandler("inbox", cmd_inbox), group=-1)
+    _app.add_handler(CommandHandler("threads", cmd_threads), group=-1)
 
     # Callbacks
     _app.add_handler(CallbackQueryHandler(callback_apply, pattern=r"^apply:"))

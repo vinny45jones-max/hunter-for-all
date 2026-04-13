@@ -186,7 +186,7 @@ async def get_full_description(url: str) -> Optional[str]:
     )
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         await _random_delay(1.0, 2.5)
 
         desc_el = await page.query_selector(SELECTORS["full_description"])

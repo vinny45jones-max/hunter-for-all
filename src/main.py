@@ -30,26 +30,24 @@ async def main():
 
     scheduler.add_job(
         pipeline.run_pipeline,
-        "interval",
-        minutes=settings.scrape_interval_minutes,
-        # next_run_time=datetime.now(),  # не запускать при старте
+        "cron",
+        hour=8,
+        minute=0,
         id="vacancy_pipeline",
         name="Vacancy Pipeline",
     )
 
     scheduler.add_job(
         pipeline.check_messages,
-        "interval",
-        minutes=settings.message_check_interval_minutes,
+        "cron",
+        hour=8,
+        minute=0,
         id="check_messages",
         name="Check Messages",
     )
 
     scheduler.start()
-    log.info(
-        f"Scheduler started: vacancies every {settings.scrape_interval_minutes}m, "
-        f"messages every {settings.message_check_interval_minutes}m"
-    )
+    log.info("Scheduler started: vacancies and messages daily at 08:00")
 
     # 3. Telegram bot
     app = bot.create_app()
