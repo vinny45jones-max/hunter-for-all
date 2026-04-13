@@ -10,10 +10,11 @@ from telegram.ext import (
 )
 
 from src.config import settings, log
-from src import database, ai_filter
+from src import database, ai_filter, cover_flow
 
 # ConversationHandler states
 WAITING_REPLY = 1
+WAITING_COVER_TEXT = 2
 
 _app: Application = None
 
@@ -24,25 +25,39 @@ def _escape_md(text: str) -> str:
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', str(text))
 
 
-def _vacancy_card_text(v) -> str:
+def _vacancy_card_text(v, today_left: int = None) -> str:
     title = _escape_md(v.title)
     company = _escape_md(v.company or "Не указана")
     salary = _escape_md(v.salary or "Не указана")
     city = _escape_md(v.city or "Не указан")
     score = v.relevance_score
     reason = _escape_md(v.relevance_reason or "")
-    cover = "Сопроводительное сгенерировано" if v.cover_letter else "Без сопроводительного"
 
-    return (
-        f"*{title}*\n"
-        f"{'─' * 20}\n"
-        f"Компания: *{company}*\n"
-        f"Зарплата: {salary}\n"
-        f"Город: {city}\n\n"
-        f"Релевантность: *{score}/100*\n"
-        f"_{reason}_\n\n"
-        f"_{_escape_md(cover)}_"
-    )
+    # Индикатор: требуется ли сопроводительное
+    if v.require_cover_letter:
+        cover = "Требуется сопроводительное письмо"
+    elif v.cover_letter:
+        cover = "Сопроводительное сгенерировано"
+    else:
+        cover = "Без сопроводительного"
+
+    lines = [
+        f"*{title}*",
+        f"{'─' * 20}",
+        f"Компания: *{company}*",
+        f"Зарплата: {salary}",
+        f"Город: {city}",
+        "",
+        f"Релевантность: *{score}/100*",
+        f"_{reason}_",
+        "",
+        f"_{_escape_md(cover)}_",
+    ]
+
+    if today_left is not None:
+        lines.append(f"\nОткликов осталось: *{today_left}*")
+
+    return "\n".join(lines)
 
 
 def _vacancy_keyboard(vacancy_id: int, url: str) -> InlineKeyboardMarkup:
@@ -90,7 +105,9 @@ def _message_keyboard(conversation_id: str, url: str = None) -> InlineKeyboardMa
 async def send_vacancy_card(vacancy):
     if not _app:
         return
-    text = _vacancy_card_text(vacancy)
+    today_count = await database.count_today_applies()
+    today_left = settings.max_applies_per_day - today_count
+    text = _vacancy_card_text(vacancy, today_left=today_left)
     keyboard = _vacancy_keyboard(vacancy.id, vacancy.url)
     await _app.bot.send_message(
         chat_id=settings.telegram_chat_id,
@@ -200,7 +217,34 @@ async def cmd_threads(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Callback handlers ──────────────────────────
 
+def _cover_preview_keyboard(vacancy_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Отправить", callback_data=f"cover_send:{vacancy_id}"),
+            InlineKeyboardButton("Изменить", callback_data=f"cover_edit:{vacancy_id}"),
+        ],
+        [
+            InlineKeyboardButton("Новый вариант", callback_data=f"cover_regen:{vacancy_id}"),
+            InlineKeyboardButton("Отмена", callback_data=f"cover_cancel:{vacancy_id}"),
+        ],
+    ])
+
+
+def _cover_user_text_keyboard(vacancy_id: int) -> InlineKeyboardMarkup:
+    """Кнопки после того как пользователь прислал свой текст письма."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Отправить", callback_data=f"cover_send:{vacancy_id}"),
+            InlineKeyboardButton("AI-доработка", callback_data=f"cover_aifix:{vacancy_id}"),
+        ],
+        [
+            InlineKeyboardButton("Отмена", callback_data=f"cover_cancel:{vacancy_id}"),
+        ],
+    ])
+
+
 async def callback_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка 'Откликнуться' — запуск cover letter flow."""
     query = update.callback_query
     await query.answer()
     vacancy_id = int(query.data.split(":")[1])
@@ -212,24 +256,36 @@ async def callback_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    vacancy = await database.get_vacancy(vacancy_id)
-    if not vacancy:
-        await query.message.reply_text("Вакансия не найдена.")
+    # Контроль: один контекст за раз
+    if context.user_data.get("editing_vacancy"):
+        await query.message.reply_text(
+            "Уже идёт работа над другим письмом. Завершите или отмените."
+        )
         return
 
-    await query.message.reply_text("Отправляю отклик...")
+    await query.message.reply_text("Генерирую сопроводительное письмо...")
 
-    from src import applier
-    success, message = await applier.apply_to_vacancy(vacancy)
+    try:
+        result = await cover_flow.start_cover_letter(vacancy_id)
+    except ValueError as e:
+        await query.message.reply_text(f"Ошибка: {e}")
+        return
 
-    if success:
-        await database.update_status(vacancy_id, "applied")
-        await query.message.reply_text(f"Отклик отправлен на: {vacancy.title}")
-        # Убрать кнопки
-        await query.edit_message_reply_markup(reply_markup=None)
-    else:
-        await database.update_status(vacancy_id, "error", message)
-        await query.message.reply_text(f"Ошибка отклика: {message}")
+    context.user_data["editing_vacancy"] = vacancy_id
+
+    preview = cover_flow.format_preview(
+        result["cover_letter"], result["requirements"], result["version"]
+    )
+    keyboard = _cover_preview_keyboard(vacancy_id)
+
+    today_left = settings.max_applies_per_day - today_count
+    footer = f"\n\n📊 Осталось откликов сегодня: {today_left}"
+
+    await query.message.reply_text(
+        preview + footer,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
 
 
 async def callback_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,6 +295,146 @@ async def callback_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await database.update_status(vacancy_id, "skipped")
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text("Пропущено.")
+
+
+# ─── Cover letter flow ─────────────────────────
+
+async def callback_cover_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить отклик с текущим письмом."""
+    query = update.callback_query
+    await query.answer()
+    vacancy_id = int(query.data.split(":")[1])
+
+    vacancy = await database.get_vacancy(vacancy_id)
+    if not vacancy or not vacancy.cover_letter:
+        await query.message.reply_text("Нет письма для отправки.")
+        context.user_data.pop("editing_vacancy", None)
+        return
+
+    try:
+        await cover_flow.confirm_send(vacancy_id)
+    except ValueError as e:
+        await query.message.reply_text(f"Ошибка: {e}")
+        return
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Отправляю отклик...")
+
+    from src import applier
+    success, message = await applier.apply_to_vacancy(vacancy)
+
+    if success:
+        await cover_flow.mark_sent(vacancy_id)
+        await database.update_status(vacancy_id, "applied")
+        await query.message.reply_text(f"Отклик отправлен: {vacancy.title}")
+    else:
+        await cover_flow.mark_failed(vacancy_id)
+        await database.update_status(vacancy_id, "error", message)
+        await query.message.reply_text(f"Ошибка отклика: {message}")
+
+    context.user_data.pop("editing_vacancy", None)
+
+
+async def callback_cover_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Перейти в режим редактирования — пользователь пишет своё письмо."""
+    query = update.callback_query
+    await query.answer()
+    vacancy_id = int(query.data.split(":")[1])
+
+    try:
+        await cover_flow.enter_editing(vacancy_id)
+    except ValueError as e:
+        await query.message.reply_text(f"Ошибка: {e}")
+        return
+
+    context.user_data["editing_vacancy"] = vacancy_id
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Напиши своё сопроводительное письмо:\n(/cancel для отмены)"
+    )
+    return WAITING_COVER_TEXT
+
+
+async def receive_cover_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получен текст письма от пользователя."""
+    text = update.message.text
+    vacancy_id = context.user_data.get("editing_vacancy")
+    if not vacancy_id:
+        await update.message.reply_text("Нет активного контекста редактирования.")
+        return ConversationHandler.END
+
+    try:
+        result = await cover_flow.submit_user_text(vacancy_id, text)
+    except ValueError as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+        return ConversationHandler.END
+
+    keyboard = _cover_user_text_keyboard(vacancy_id)
+    await update.message.reply_text(
+        f"Твоё письмо:\n\n{text}\n\nОтправить или доработать AI?",
+        reply_markup=keyboard,
+    )
+    return ConversationHandler.END
+
+
+async def cancel_cover_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена редактирования письма по /cancel."""
+    vacancy_id = context.user_data.pop("editing_vacancy", None)
+    if vacancy_id:
+        await cover_flow.cancel(vacancy_id)
+    await update.message.reply_text("Редактирование отменено.")
+    return ConversationHandler.END
+
+
+async def callback_cover_aifix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """AI-доработка текста пользователя с учётом требований."""
+    query = update.callback_query
+    await query.answer("Дорабатываю текст...")
+    vacancy_id = int(query.data.split(":")[1])
+
+    try:
+        result = await cover_flow.ai_improve_user_text(vacancy_id)
+    except ValueError as e:
+        await query.message.reply_text(f"Ошибка: {e}")
+        return
+
+    preview = f"✉️ <b>Доработанное письмо:</b>\n{result['cover_letter']}"
+    keyboard = _cover_preview_keyboard(vacancy_id)
+
+    await query.message.reply_text(preview, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def callback_cover_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сгенерировать новый вариант письма."""
+    query = update.callback_query
+    await query.answer("Генерирую новый вариант...")
+    vacancy_id = int(query.data.split(":")[1])
+
+    try:
+        result = await cover_flow.regenerate_cover_letter(vacancy_id)
+    except ValueError as e:
+        await query.message.reply_text(f"Ошибка: {e}")
+        return
+
+    preview = cover_flow.format_preview(
+        result["cover_letter"], result["requirements"], result["version"]
+    )
+    keyboard = _cover_preview_keyboard(vacancy_id)
+
+    await query.message.reply_text(preview, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def callback_cover_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена cover letter flow."""
+    query = update.callback_query
+    await query.answer()
+    vacancy_id = int(query.data.split(":")[1])
+
+    await cover_flow.cancel(vacancy_id)
+    context.user_data.pop("editing_vacancy", None)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Отклик отменён.")
 
 
 # ─── Reply conversation ─────────────────────────
@@ -402,6 +598,27 @@ def create_app() -> Application:
 
     _app.add_handler(reply_conv)
 
+    # Cover letter edit conversation handler
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*per_message.*", category=UserWarning)
+        cover_edit_conv = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(callback_cover_edit, pattern=r"^cover_edit:"),
+            ],
+            states={
+                WAITING_COVER_TEXT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, receive_cover_text),
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", cancel_cover_edit),
+            ],
+            per_message=False,
+            per_chat=True,
+        )
+
+    _app.add_handler(cover_edit_conv)
+
     # Commands
     _app.add_handler(CommandHandler("start", cmd_start))
     _app.add_handler(CommandHandler("stats", cmd_stats))
@@ -417,5 +634,11 @@ def create_app() -> Application:
     _app.add_handler(CallbackQueryHandler(callback_send, pattern=r"^send:"))
     _app.add_handler(CallbackQueryHandler(callback_improve, pattern=r"^improve:"))
     _app.add_handler(CallbackQueryHandler(callback_cancel_reply, pattern=r"^cancel_reply:"))
+
+    # Cover letter flow callbacks
+    _app.add_handler(CallbackQueryHandler(callback_cover_send, pattern=r"^cover_send:"))
+    _app.add_handler(CallbackQueryHandler(callback_cover_aifix, pattern=r"^cover_aifix:"))
+    _app.add_handler(CallbackQueryHandler(callback_cover_regen, pattern=r"^cover_regen:"))
+    _app.add_handler(CallbackQueryHandler(callback_cover_cancel, pattern=r"^cover_cancel:"))
 
     return _app

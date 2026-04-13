@@ -61,7 +61,7 @@ COVER_LETTER_PROMPT = """
 
 Вакансия: {title} в {company}
 Описание: {description}
-
+{requirements_block}
 Кандидат — Роман Комолов:
 - 15+ лет на позициях CEO, COO, коммерческий директор в B2B, дистрибуции, ритейле, e-commerce
 - Управлял компаниями с оборотом до $60M и командами до 150 человек
@@ -69,10 +69,27 @@ COVER_LETTER_PROMPT = """
 - AI-интегратор: создал экосистему из 10+ AI-агентов, автоматизировал 25%+ процессов
 - Подтверждённые результаты: +25-40% рост валовой прибыли, экспортные контракты на $15M
 - Стек: n8n, Claude API, Supabase, Bitrix24
-
+{version_block}
 Тон: уверенный, конкретный, без воды. Русский язык.
 Не начинай с "Уважаемый". Сразу к делу.
 Покажи конкретную ценность для этой компании, привяжи к их задачам.
+"""
+
+IMPROVE_COVER_LETTER_PROMPT = """
+Доработай сопроводительное письмо кандидата для отклика на вакансию.
+
+Вакансия: {title} в {company}
+Описание: {description}
+{requirements_block}
+Текст кандидата:
+{user_text}
+
+Задача:
+- Сохрани основную мысль и стиль автора
+- Сделай профессиональнее и конкретнее
+- Убедись что письмо отвечает на требования работодателя (если есть)
+- Убери воду, оставь суть
+- Русский язык. Верни ТОЛЬКО текст письма.
 """
 
 REPLY_PROMPT = """
@@ -153,11 +170,29 @@ async def evaluate_relevance(vacancy: Vacancy) -> dict:
             return {"score": 0, "reason": f"AI error: {e}"}
 
 
-async def generate_cover_letter(vacancy: Vacancy) -> str:
+async def generate_cover_letter(
+    vacancy: Vacancy,
+    requirements: List[str] | None = None,
+    version: int = 1,
+) -> str:
+    req_block = ""
+    if requirements:
+        items = "\n".join(f"- {r}" for r in requirements)
+        req_block = f"\nТребования работодателя к письму:\n{items}\nОбязательно ответь на каждое требование.\n"
+
+    ver_block = ""
+    if version > 1:
+        ver_block = (
+            f"\nЭто вариант #{version}. Напиши письмо с другого ракурса, "
+            f"выдели другие сильные стороны кандидата.\n"
+        )
+
     prompt = COVER_LETTER_PROMPT.format(
         title=vacancy.title,
         company=vacancy.company or "Не указана",
         description=(vacancy.description or "")[:3000],
+        requirements_block=req_block,
+        version_block=ver_block,
     )
 
     try:
@@ -170,6 +205,36 @@ async def generate_cover_letter(vacancy: Vacancy) -> str:
     except Exception as e:
         log.error(f"Cover letter generation failed: {e}")
         return ""
+
+
+async def improve_cover_letter(
+    text: str,
+    vacancy: Vacancy,
+    requirements: List[str] | None = None,
+) -> str:
+    req_block = ""
+    if requirements:
+        items = "\n".join(f"- {r}" for r in requirements)
+        req_block = f"\nТребования работодателя к письму:\n{items}\n"
+
+    prompt = IMPROVE_COVER_LETTER_PROMPT.format(
+        title=vacancy.title,
+        company=vacancy.company or "Не указана",
+        description=(vacancy.description or "")[:3000],
+        requirements_block=req_block,
+        user_text=text,
+    )
+
+    try:
+        response = await _client.messages.create(
+            model=MODEL,
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        log.error(f"Cover letter improvement failed: {e}")
+        return text
 
 
 async def generate_reply(
