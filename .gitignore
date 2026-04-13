@@ -1,0 +1,11 @@
+.env
+.env.test
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/hunter.db
+data/rabota_session.json
+data/screenshots/
+data/debug/
+data/*.db

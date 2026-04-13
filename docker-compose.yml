@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  hunter:
+    build: .
+    container_name: rabota-hunter
+    env_file: .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

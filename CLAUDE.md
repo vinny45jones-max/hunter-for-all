@@ -7,7 +7,7 @@
 Python 3.11, async. Модули в `src/`:
 
 - `main.py` — точка входа, APScheduler + Telegram polling
-- `pipeline.py` — основной цикл: scrape → deduplicate → AI score → notify TG
+- `pipeline.py` — основной цикл: scrape -> deduplicate -> AI score -> notify TG
 - `scraper.py` — Playwright-скрапер rabota.by (поиск + описание вакансий)
 - `ai_filter.py` — Claude API (оценка релевантности, cover letter, ответы)
 - `bot.py` — Telegram-бот (команды, inline-кнопки, ConversationHandler для ответов)
@@ -22,7 +22,7 @@ Python 3.11, async. Модули в `src/`:
 
 - `playwright` — браузерная автоматизация (Chromium, headless)
 - `python-telegram-bot` — Telegram Bot API
-- `anthropic` — Claude API
+- `anthropic` — Claude API (модель: claude-sonnet-4-20250514)
 - `apscheduler` — периодические задачи
 - `aiosqlite` — async SQLite
 - `pydantic-settings` — конфигурация из env
@@ -30,44 +30,44 @@ Python 3.11, async. Модули в `src/`:
 ## Запуск
 
 ```bash
-# Установка зависимостей
-pip install -r requirements.txt
-playwright install chromium
-
-# Настройка
-cp .env.example .env
-# Заполнить .env своими ключами
-
 # Локально
 python -m src.main
 
 # Docker
 docker compose up -d
+
+# Деплой — Railway (Dockerfile, volume /data)
 ```
 
 ## Тесты
 
 ```bash
-# Юнит-тесты
+# Локальные тесты (64 passed, 3 skipped)
 python -m pytest -q
 
-# Live API тесты (нужен ANTHROPIC_API_KEY)
+# Live API тесты (нужен ANTHROPIC_API_KEY в .env)
 python -m pytest tests/test_ai_filter_live.py --live-api -q
 
 # Live end-to-end (API + браузер)
 python -m pytest tests/test_pipeline_live.py --live-api --live-web -q
 ```
 
+Live-тесты отключены по умолчанию (флаги `--live-api`, `--live-web`).
+
 ## Конфигурация
 
-Все параметры в `.env` (см. `.env.example`):
+Все параметры в `.env` (см. `src/config.py`):
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — Telegram
+- `ANTHROPIC_API_KEY` — Claude API
+- `RABOTA_EMAIL`, `RABOTA_PASSWORD` — учётка rabota.by
+- `SEARCH_QUERIES` — ключевые слова через запятую
+- `MIN_RELEVANCE_SCORE` — порог релевантности (0-100)
+- `DB_PATH`, `SESSION_PATH` — пути к данным
 
-| Переменная | Описание |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота |
-| `TELEGRAM_CHAT_ID` | ID чата для уведомлений |
-| `ANTHROPIC_API_KEY` | Ключ Claude API |
-| `RABOTA_EMAIL` | Email на rabota.by |
-| `RABOTA_PASSWORD` | Пароль на rabota.by |
-| `SEARCH_QUERIES` | Ключевые слова (через запятую) |
-| `MIN_RELEVANCE_SCORE` | Порог релевантности (0-100) |
+## Важно
+
+- `.env` содержит секреты — никогда не коммитить
+- CSS-селекторы rabota.by в `scraper.py:SELECTORS` и `inbox.py:INBOX_SELECTORS` — могут сломаться при обновлении сайта
+- На Windows скрапер использует системный Chrome (`chrome` channel), в Docker — Playwright Chromium
+- Профиль кандидата захардкожен в `ai_filter.py` (промпты EVALUATE_PROMPT, COVER_LETTER_PROMPT, REPLY_PROMPT)
+- Лимит откликов: `max_applies_per_day` (default 10)
