@@ -3,7 +3,11 @@ import aiosqlite
 from typing import List, Optional
 
 from src.config import settings, log
+from src.crypto import encrypt, decrypt, ENC_PREFIX
 from src.models import Vacancy, Message, Conversation
+
+ENCRYPTED_SETTING_KEYS = {"rabota_password"}
+ENCRYPTED_USER_FIELDS = {"password"}
 
 _db_path = settings.db_path
 
@@ -446,7 +450,12 @@ async def get_setting(chat_id: str, key: str, default: str = None) -> Optional[s
         row = await (await db.execute(
             "SELECT value FROM user_settings WHERE chat_id=? AND key=?", (str(chat_id), key)
         )).fetchone()
-    return row[0] if row else default
+    if not row:
+        return default
+    value = row[0]
+    if key in ENCRYPTED_SETTING_KEYS and value and value.startswith(ENC_PREFIX):
+        return decrypt(value)
+    return value
 
 
 async def get_setting_int(chat_id: str, key: str, default: int = 0) -> int:
@@ -460,11 +469,12 @@ async def get_setting_int(chat_id: str, key: str, default: int = 0) -> int:
 
 
 async def set_setting(chat_id: str, key: str, value: str):
+    stored = encrypt(value) if key in ENCRYPTED_SETTING_KEYS and value else value
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(
             "INSERT INTO user_settings (chat_id, key, value, updated_at) VALUES (?, ?, ?, datetime('now')) "
             "ON CONFLICT(chat_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (str(chat_id), key, value),
+            (str(chat_id), key, stored),
         )
         await db.commit()
 
@@ -475,7 +485,13 @@ async def get_all_settings(chat_id: str) -> dict:
             "SELECT key, value FROM user_settings WHERE chat_id=?", (str(chat_id),)
         )
         rows = await cursor.fetchall()
-    return {row[0]: row[1] for row in rows}
+    result = {}
+    for key, value in rows:
+        if key in ENCRYPTED_SETTING_KEYS and value and value.startswith(ENC_PREFIX):
+            result[key] = decrypt(value)
+        else:
+            result[key] = value
+    return result
 
 
 async def get_all_registered_chats() -> List[str]:
@@ -523,6 +539,10 @@ async def get_user(telegram_id: int) -> Optional[dict]:
     user = dict(row)
     if user.get("profile"):
         user["profile"] = json.loads(user["profile"])
+    for field in ENCRYPTED_USER_FIELDS:
+        val = user.get(field)
+        if val and isinstance(val, str) and val.startswith(ENC_PREFIX):
+            user[field] = decrypt(val)
     return user
 
 
@@ -532,6 +552,9 @@ _USER_COLUMNS = {"email", "password", "profile", "keywords", "min_score", "onboa
 async def save_user(telegram_id: int, **fields) -> None:
     if "profile" in fields and isinstance(fields["profile"], dict):
         fields["profile"] = json.dumps(fields["profile"], ensure_ascii=False)
+    for field in ENCRYPTED_USER_FIELDS:
+        if field in fields and fields[field]:
+            fields[field] = encrypt(fields[field])
     bad_keys = set(fields) - _USER_COLUMNS
     if bad_keys:
         raise ValueError(f"Недопустимые поля: {bad_keys}")
@@ -549,6 +572,9 @@ async def save_user(telegram_id: int, **fields) -> None:
 async def update_user(telegram_id: int, **fields) -> None:
     if "profile" in fields and isinstance(fields["profile"], dict):
         fields["profile"] = json.dumps(fields["profile"], ensure_ascii=False)
+    for field in ENCRYPTED_USER_FIELDS:
+        if field in fields and fields[field]:
+            fields[field] = encrypt(fields[field])
     bad_keys = set(fields) - _USER_COLUMNS
     if bad_keys:
         raise ValueError(f"Недопустимые поля: {bad_keys}")

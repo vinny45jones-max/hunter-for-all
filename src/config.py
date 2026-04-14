@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # Claude API
     anthropic_api_key: str
 
+    # Шифрование паролей юзеров (Fernet base64 key)
+    fernet_key: str
+
     # rabota.by
     rabota_email: str
     rabota_password: str
