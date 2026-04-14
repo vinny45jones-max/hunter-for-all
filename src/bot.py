@@ -295,8 +295,9 @@ async def onboard_confirm_go(update: Update, context: ContextTypes.DEFAULT_TYPE)
         yaml.dump(profile_data, f, allow_unicode=True, default_flow_style=False)
 
     # Сохраняем учётку в БД
-    await database.set_setting("rabota_email", email)
-    await database.set_setting("rabota_password", password)
+    cid = str(query.message.chat_id)
+    await database.set_setting(cid, "rabota_email", email)
+    await database.set_setting(cid, "rabota_password", password)
 
     # Сбрасываем кеш профиля в ai_filter
     ai_filter._profile_cache = None
@@ -379,7 +380,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(profile_path, "r", encoding="utf-8") as f:
         profile = yaml.safe_load(f)
 
-    email = await database.get_setting("rabota_email") or "не указан"
+    cid = str(update.effective_chat.id)
+    email = await database.get_setting(cid, "rabota_email") or "не указан"
     keywords = ", ".join(profile.get("search_keywords", []))
 
     keyboard = InlineKeyboardMarkup([
@@ -413,7 +415,8 @@ async def settings_save_email(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Введите корректный email:")
         return SETTINGS_EMAIL
 
-    await database.set_setting("rabota_email", email)
+    cid = str(update.effective_chat.id)
+    await database.set_setting(cid, "rabota_email", email)
     await update.message.reply_text(f"Email обновлён: {email}")
     return ConversationHandler.END
 
@@ -440,7 +443,8 @@ async def settings_save_password(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Пароль не может быть пустым:")
         return SETTINGS_PASSWORD
 
-    await database.set_setting("rabota_password", password)
+    cid = str(update.effective_chat.id)
+    await database.set_setting(cid, "rabota_password", password)
     await update.message.reply_text("Пароль обновлён.")
     return ConversationHandler.END
 
