@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # Пути (Railway Volume монтируется в /data)
     db_path: str = "/data/hunter.db"
     session_path: str = "/data/rabota_session.json"
+    sessions_dir: str = "/data/sessions"
 
     # Лимиты
     max_applies_per_day: int = 10

@@ -350,3 +350,65 @@ async def improve_text(text: str) -> str:
     except Exception as e:
         log.error(f"Text improvement failed: {e}")
         return text
+
+
+PARSE_RESUME_PROMPT = """Извлеки из резюме структурированную информацию. Верни ТОЛЬКО валидный JSON:
+{
+  "name": "Имя Фамилия",
+  "position": "желаемая должность",
+  "experience_years": 3,
+  "skills": ["Python", "SQL", ...],
+  "education": "краткое описание образования",
+  "summary": "2-3 предложения — ключевые компетенции кандидата"
+}
+Если поле не найдено — null."""
+
+
+async def parse_resume(file_bytes: bytes, filename: str) -> dict:
+    """Парсинг резюме (PDF/DOCX) через Claude Vision/text."""
+    import base64
+
+    ext = filename.rsplit(".", 1)[-1].lower()
+
+    if ext == "pdf":
+        content = [
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.standard_b64encode(file_bytes).decode(),
+                },
+            },
+            {"type": "text", "text": PARSE_RESUME_PROMPT},
+        ]
+    else:
+        # DOCX и прочее — извлекаем текст
+        text = _extract_text(file_bytes, ext)
+        content = f"{PARSE_RESUME_PROMPT}\n\n---\n{text}"
+
+    try:
+        response = await _client.messages.create(
+            model=MODEL,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": content}],
+        )
+        raw = response.content[0].text.strip()
+        raw = re.sub(r"^```json\s*|```$", "", raw, flags=re.MULTILINE).strip()
+        return json.loads(raw)
+    except Exception as e:
+        log.error(f"Resume parsing failed: {e}")
+        return {}
+
+
+def _extract_text(file_bytes: bytes, ext: str) -> str:
+    """Извлечение текста из DOCX."""
+    if ext == "docx":
+        try:
+            import docx
+            import io
+            doc = docx.Document(io.BytesIO(file_bytes))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except ImportError:
+            return "[python-docx не установлен — загрузите PDF]"
+    return file_bytes.decode("utf-8", errors="replace")

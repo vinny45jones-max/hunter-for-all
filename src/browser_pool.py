@@ -2,9 +2,9 @@
 import os
 from typing import Optional
 
-from playwright.async_api import async_playwright, Browser, Playwright
+from playwright.async_api import async_playwright, Browser, BrowserContext, Playwright
 
-from src.config import log
+from src.config import settings, log
 
 _browser: Optional[Browser] = None
 _playwright: Optional[Playwright] = None
@@ -47,6 +47,34 @@ async def get_browser() -> Browser:
             log.info(f"Browser pool: using system Chrome (channel={channel})")
         _browser = await _playwright.chromium.launch(**launch_kwargs)
     return _browser
+
+
+def _session_path(chat_id: str | int) -> str:
+    return os.path.join(settings.sessions_dir, str(chat_id), "storage_state.json")
+
+
+async def get_context(chat_id: str | int) -> BrowserContext:
+    """Контекст браузера с per-user storage_state.
+
+    Загружает `sessions_dir/{chat_id}/storage_state.json` если файл есть.
+    Сохранение делает `save_context()` или `auth.ensure_logged_in()`.
+    """
+    browser = await get_browser()
+    path = _session_path(chat_id)
+    storage_state = path if os.path.exists(path) else None
+    context = await browser.new_context(
+        storage_state=storage_state,
+        user_agent=USER_AGENT,
+        viewport={"width": 1920, "height": 1080},
+    )
+    return context
+
+
+async def save_context(context: BrowserContext, chat_id: str | int) -> str:
+    path = _session_path(chat_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    await context.storage_state(path=path)
+    return path
 
 
 async def close():
