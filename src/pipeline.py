@@ -92,14 +92,15 @@ async def run_pipeline():
                 log.warning(f"Pipeline: failed to get description for {v.url}: {e}")
 
         # 6. Полная AI-оценка с описанием + cover letter (один вызов)
+        min_score = await database.get_setting_int("min_relevance_score", settings.min_relevance_score)
         await bot.send_text(f"Оцениваю {len(promising)} вакансий с описаниями...")
         for v in promising:
             try:
-                result = await ai_filter.evaluate_and_cover(v, settings.min_relevance_score)
+                result = await ai_filter.evaluate_and_cover(v, min_score)
                 v.relevance_score = result["score"]
                 v.relevance_reason = result["reason"]
 
-                if v.relevance_score >= settings.min_relevance_score and result.get("cover_letter"):
+                if v.relevance_score >= min_score and result.get("cover_letter"):
                     v.cover_letter = result["cover_letter"]
                     v.status = "filtered"
             except Exception as e:

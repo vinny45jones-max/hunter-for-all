@@ -59,6 +59,12 @@ async def init():
                 replied_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS user_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS conversations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conversation_id TEXT UNIQUE NOT NULL,
@@ -88,6 +94,39 @@ async def init():
                 await db.execute(f"ALTER TABLE vacancies ADD COLUMN {col_name} {col_def}")
                 log.info(f"Migrated: added column vacancies.{col_name}")
         await db.commit()
+    # Дефолтные настройки (только если таблица пустая)
+    async with aiosqlite.connect(_db_path) as db:
+        count = (await (await db.execute("SELECT COUNT(*) FROM user_settings")).fetchone())[0]
+        if count == 0:
+            defaults = {
+                "min_relevance_score": str(settings.min_relevance_score),
+                "max_pages": str(settings.max_pages),
+                "search_city": settings.search_city,
+                "search_queries": settings.search_queries,
+                "scrape_interval_minutes": str(settings.scrape_interval_minutes),
+                "message_check_interval_minutes": str(settings.message_check_interval_minutes),
+                "max_applies_per_day": str(settings.max_applies_per_day),
+                "candidate_name": "Роман Комолов",
+                "candidate_profile": (
+                    "Director of Business Development | Commercial Transformation & AI Integration Specialist\n"
+                    "15+ лет управленческого опыта на позициях CEO, COO, CCO, коммерческий директор\n"
+                    "Отрасли: B2B оптовая торговля, дистрибуция, производство, ритейл, e-commerce\n"
+                    "Масштаб: компании $2M—$60M, команды 25—150 чел\n"
+                    "Компетенции: Business Development, P&L, AI-интеграция, CRM, Change Management\n"
+                    "Результаты: +25-40% рост прибыли, экспортные контракты $15M, рост выручки в 3-4x\n"
+                    "Образование: MBA (РАНХиГС), БГУ\n"
+                    "Языки: русский (родной), английский (C1-C2), польский (свободно)\n"
+                    "Локация: Минск, Беларусь | Варшава, Польша"
+                ),
+            }
+            for key, value in defaults.items():
+                await db.execute(
+                    "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+            await db.commit()
+            log.info("Default user_settings populated")
+
     log.info("Database initialized")
 
 
@@ -398,3 +437,40 @@ async def get_active_conversations() -> List[Conversation]:
         )
         for r in rows
     ]
+
+
+# ─── User Settings ─────────────────────────────
+
+async def get_setting(key: str, default: str = None) -> Optional[str]:
+    async with aiosqlite.connect(_db_path) as db:
+        row = await (await db.execute(
+            "SELECT value FROM user_settings WHERE key=?", (key,)
+        )).fetchone()
+    return row[0] if row else default
+
+
+async def get_setting_int(key: str, default: int = 0) -> int:
+    val = await get_setting(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+async def set_setting(key: str, value: str):
+    async with aiosqlite.connect(_db_path) as db:
+        await db.execute(
+            "INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value),
+        )
+        await db.commit()
+
+
+async def get_all_settings() -> dict:
+    async with aiosqlite.connect(_db_path) as db:
+        cursor = await db.execute("SELECT key, value FROM user_settings")
+        rows = await cursor.fetchall()
+    return {row[0]: row[1] for row in rows}

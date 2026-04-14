@@ -6,6 +6,7 @@ import anthropic
 
 from src.config import settings, log
 from src.models import Vacancy, Message
+from src import database
 
 _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=5)
 MODEL = "claude-sonnet-4-20250514"
@@ -16,11 +17,8 @@ SYSTEM_PROMPT = (
 )
 
 BATCH_EVALUATE_PROMPT = """
-ПРОФИЛЬ КАНДИДАТА — Роман Комолов:
-- Director of Business Development | Commercial Transformation & AI Integration Specialist
-- 15+ лет на позициях CEO, COO, CCO, коммерческий директор
-- Отрасли: B2B оптовая торговля, дистрибуция, производство, ритейл, e-commerce
-- Компетенции: Business Development, P&L management, AI-интеграция, CRM, Change Management
+ПРОФИЛЬ КАНДИДАТА — {candidate_name}:
+{candidate_profile}
 
 Оцени каждую вакансию по названию и компании (0-100).
 Отвечай ТОЛЬКО JSON-массивом, без пояснений:
@@ -31,31 +29,8 @@ BATCH_EVALUATE_PROMPT = """
 """
 
 EVALUATE_PROMPT = """
-ПРОФИЛЬ КАНДИДАТА — Роман Комолов:
-- Director of Business Development | Commercial Transformation & AI Integration Specialist
-- 15+ лет управленческого опыта на позициях CEO, COO, CCO, коммерческий директор
-- Отрасли: B2B оптовая торговля, дистрибуция, производство, ритейл, e-commerce, текстиль, бытовая техника
-- Масштаб управления: компании с оборотом $2M—$60M, команды 25—150 чел
-- Ключевые компетенции:
-  * Business Development & Commercial Transformation
-  * Operating Model Design & Process Optimization
-  * P&L management, Margin Management, Category Management
-  * KPI Systems, управленческий учет, финансовая аналитика
-  * Inventory Optimization, Working Capital Management
-  * CRM внедрение (Bitrix24), Change Management
-- AI & Digital Transformation:
-  * AI-Agent Orchestration (экосистемы из 10+ AI-агентов)
-  * Автоматизация 25%+ критических бизнес-процессов
-  * AI-Assisted Reporting & Decision Support Systems
-  * Стек: n8n, Claude API, Supabase, Telegram-боты
-- Подтверждённые результаты:
-  * +25-40% рост валовой прибыли, +20% рост чистой прибыли
-  * Экспортные контракты на $15M, запуск 6 направлений с нуля
-  * Рост выручки компаний в 3-4 раза
-  * $60M годовой оборот (собственный бизнес)
-- Образование: MBA (РАНХиГС), БГУ (бухучёт, аудит)
-- Языки: русский (родной), английский (C1-C2), польский (свободно)
-- Локация: Минск, Беларусь | Варшава, Польша
+ПРОФИЛЬ КАНДИДАТА — {candidate_name}:
+{candidate_profile}
 
 ВАКАНСИЯ:
 Название: {title}
@@ -81,13 +56,8 @@ COVER_LETTER_PROMPT = """
 Вакансия: {title} в {company}
 Описание: {description}
 {requirements_block}
-Кандидат — Роман Комолов:
-- 15+ лет на позициях CEO, COO, коммерческий директор в B2B, дистрибуции, ритейле, e-commerce
-- Управлял компаниями с оборотом до $60M и командами до 150 человек
-- Специализация: коммерческая трансформация, построение управляемых бизнес-систем
-- AI-интегратор: создал экосистему из 10+ AI-агентов, автоматизировал 25%+ процессов
-- Подтверждённые результаты: +25-40% рост валовой прибыли, экспортные контракты на $15M
-- Стек: n8n, Claude API, Supabase, Bitrix24
+Кандидат — {candidate_name}:
+{candidate_profile}
 {version_block}
 Тон: уверенный, конкретный, без воды. Русский язык.
 Не начинай с "Уважаемый". Сразу к делу.
@@ -123,11 +93,8 @@ REPLY_PROMPT = """
 ПОСЛЕДНЕЕ СООБЩЕНИЕ ОТ РАБОТОДАТЕЛЯ:
 {last_message}
 
-ПРОФИЛЬ СОИСКАТЕЛЯ — Роман Комолов:
-- 15+ лет C-level (CEO, COO, CCO) в B2B, дистрибуции, ритейле, e-commerce
-- Коммерческая трансформация, AI-интеграция, автоматизация бизнес-процессов
-- Управлял компаниями $2M—$60M, командами 25—150 чел
-- Уверенный, конкретный стиль общения
+ПРОФИЛЬ СОИСКАТЕЛЯ — {candidate_name}:
+{candidate_profile}
 
 ЗАДАЧА:
 Напиши ответ (2-5 предложений).
@@ -136,6 +103,13 @@ REPLY_PROMPT = """
 - Если просят информацию — предоставь кратко
 Тон: профессиональный, без подобострастия. Русский язык.
 """
+
+
+async def _get_candidate_info() -> tuple[str, str]:
+    """Возвращает (candidate_name, candidate_profile) из БД."""
+    name = await database.get_setting("candidate_name", "Кандидат")
+    profile = await database.get_setting("candidate_profile", "Профиль не заполнен")
+    return name, profile
 
 
 def _parse_json(text: str) -> dict:
@@ -168,6 +142,7 @@ def _parse_json(text: str) -> dict:
 async def batch_evaluate_titles(vacancies: List[Vacancy], batch_size: int = 30) -> dict[int, int]:
     """Быстрая оценка по названию+компания батчами. Возвращает {index: score}."""
     all_scores = {}
+    candidate_name, candidate_profile = await _get_candidate_info()
 
     for start in range(0, len(vacancies), batch_size):
         batch = vacancies[start:start + batch_size]
@@ -176,7 +151,11 @@ async def batch_evaluate_titles(vacancies: List[Vacancy], batch_size: int = 30) 
             idx = start + i
             lines.append(f"{idx}. {v.title} | {v.company or 'N/A'} | {v.salary or 'N/A'}")
 
-        prompt = BATCH_EVALUATE_PROMPT.format(vacancies_block="\n".join(lines))
+        prompt = BATCH_EVALUATE_PROMPT.format(
+            vacancies_block="\n".join(lines),
+            candidate_name=candidate_name,
+            candidate_profile=candidate_profile,
+        )
 
         try:
             response = await _client.messages.create(
@@ -207,6 +186,8 @@ async def batch_evaluate_titles(vacancies: List[Vacancy], batch_size: int = 30) 
 
 async def evaluate_and_cover(vacancy: Vacancy, min_score: int = 60) -> dict:
     """Оценка + cover letter в одном вызове. Возвращает {score, reason, cover_letter}."""
+    candidate_name, candidate_profile = await _get_candidate_info()
+
     req_block = ""
     if hasattr(vacancy, '_requirements') and vacancy._requirements:
         items = "\n".join(f"- {r}" for r in vacancy._requirements)
@@ -220,6 +201,8 @@ async def evaluate_and_cover(vacancy: Vacancy, min_score: int = 60) -> dict:
         description=(vacancy.description or "")[:3000],
         min_score=min_score,
         requirements_block=req_block,
+        candidate_name=candidate_name,
+        candidate_profile=candidate_profile,
     )
 
     for attempt in range(2):
@@ -247,6 +230,8 @@ async def generate_cover_letter(
     requirements: List[str] | None = None,
     version: int = 1,
 ) -> str:
+    candidate_name, candidate_profile = await _get_candidate_info()
+
     req_block = ""
     if requirements:
         items = "\n".join(f"- {r}" for r in requirements)
@@ -265,6 +250,8 @@ async def generate_cover_letter(
         description=(vacancy.description or "")[:3000],
         requirements_block=req_block,
         version_block=ver_block,
+        candidate_name=candidate_name,
+        candidate_profile=candidate_profile,
     )
 
     try:
@@ -313,6 +300,8 @@ async def generate_reply(
     vacancy: Vacancy,
     history: List[Message],
 ) -> str:
+    candidate_name, candidate_profile = await _get_candidate_info()
+
     history_text = "\n".join(
         f"{'[Работодатель]' if m.direction == 'incoming' else '[Вы]'}: {m.text}"
         for m in history
@@ -327,6 +316,8 @@ async def generate_reply(
         vacancy_description=(vacancy.description or "")[:2000] if vacancy else "",
         conversation_history=history_text or "Нет истории",
         last_message=last_incoming or "Нет сообщения",
+        candidate_name=candidate_name,
+        candidate_profile=candidate_profile,
     )
 
     try:

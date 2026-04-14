@@ -15,6 +15,7 @@ from src import database, ai_filter, cover_flow
 # ConversationHandler states
 WAITING_REPLY = 1
 WAITING_COVER_TEXT = 2
+WAITING_SETTING_VALUE = 3
 
 _app: Application = None
 
@@ -151,7 +152,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/search - запустить парсинг сейчас\n"
         "/last - последние 5 вакансий\n"
         "/inbox - непрочитанные сообщения\n"
-        "/threads - активные переписки"
+        "/threads - активные переписки\n"
+        "/settings - настройки поиска и профиль"
     )
 
 
@@ -213,6 +215,105 @@ async def cmd_threads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_icon = {"active": ">>", "waiting_reply": "??", "replied": "ok"}.get(c.status, "")
         lines.append(f"[{status_icon}] {c.company or 'N/A'} - {c.vacancy_title or 'N/A'}")
     await update.message.reply_text("Активные переписки:\n\n" + "\n".join(lines))
+
+
+# ─── Settings ──────────────────────────────────
+
+# Настройки, доступные для редактирования через бота
+EDITABLE_SETTINGS = {
+    "min_relevance_score": "Мин. релевантность (0-100)",
+    "max_pages": "Макс. страниц поиска",
+    "search_city": "Город поиска",
+    "search_queries": "Ключевые слова (через запятую)",
+    "scrape_interval_minutes": "Интервал поиска (мин)",
+    "message_check_interval_minutes": "Проверка сообщений (мин)",
+    "max_applies_per_day": "Макс. откликов в день",
+}
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    all_settings = await database.get_all_settings()
+
+    lines = ["*Настройки*\n"]
+    for key, label in EDITABLE_SETTINGS.items():
+        val = _escape_md(all_settings.get(key, "—"))
+        lines.append(f"{_escape_md(label)}: *{val}*")
+
+    # Профиль — показываем только имя
+    name = all_settings.get("candidate_name", "Не задано")
+    lines.append(f"\nПрофиль: *{_escape_md(name)}*")
+
+    buttons = []
+    keys = list(EDITABLE_SETTINGS.keys())
+    for i in range(0, len(keys), 2):
+        row = []
+        for k in keys[i:i+2]:
+            row.append(InlineKeyboardButton(
+                EDITABLE_SETTINGS[k].split("(")[0].strip(),
+                callback_data=f"set:{k}",
+            ))
+        buttons.append(row)
+    buttons.append([
+        InlineKeyboardButton("Профиль", callback_data="set:candidate_profile"),
+    ])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def callback_set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    key = query.data.split(":", 1)[1]
+
+    current = await database.get_setting(key, "—")
+    label = EDITABLE_SETTINGS.get(key, key)
+
+    if key == "candidate_profile":
+        label = "Профиль кандидата"
+        await query.message.reply_text(
+            f"Текущий профиль:\n\n{current}\n\nОтправь новый текст профиля (или /cancel):"
+        )
+    else:
+        await query.message.reply_text(
+            f"{label}\nТекущее значение: {current}\n\nОтправь новое значение (или /cancel):"
+        )
+
+    context.user_data["editing_setting"] = key
+    return WAITING_SETTING_VALUE
+
+
+async def receive_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = context.user_data.pop("editing_setting", None)
+    if not key:
+        await update.message.reply_text("Нет активной настройки для редактирования.")
+        return ConversationHandler.END
+
+    value = update.message.text.strip()
+
+    # Валидация числовых настроек
+    int_keys = {"min_relevance_score", "max_pages", "scrape_interval_minutes",
+                "message_check_interval_minutes", "max_applies_per_day"}
+    if key in int_keys:
+        try:
+            int(value)
+        except ValueError:
+            await update.message.reply_text("Нужно число. Попробуй ещё раз через /settings.")
+            return ConversationHandler.END
+
+    await database.set_setting(key, value)
+    label = EDITABLE_SETTINGS.get(key, key)
+    await update.message.reply_text(f"Сохранено: {label} = {value}")
+    return ConversationHandler.END
+
+
+async def cancel_setting_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("editing_setting", None)
+    await update.message.reply_text("Отменено.")
+    return ConversationHandler.END
 
 
 # ─── Callback handlers ──────────────────────────
@@ -619,6 +720,27 @@ def create_app() -> Application:
 
     _app.add_handler(cover_edit_conv)
 
+    # Settings conversation handler
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*per_message.*", category=UserWarning)
+        settings_conv = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(callback_set_setting, pattern=r"^set:"),
+            ],
+            states={
+                WAITING_SETTING_VALUE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, receive_setting_value),
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", cancel_setting_edit),
+            ],
+            per_message=False,
+            per_chat=True,
+        )
+
+    _app.add_handler(settings_conv)
+
     # Commands — группа -1 чтобы обрабатывались до ConversationHandler
     _app.add_handler(CommandHandler("start", cmd_start), group=-1)
     _app.add_handler(CommandHandler("stats", cmd_stats), group=-1)
@@ -626,6 +748,7 @@ def create_app() -> Application:
     _app.add_handler(CommandHandler("search", cmd_search), group=-1)
     _app.add_handler(CommandHandler("inbox", cmd_inbox), group=-1)
     _app.add_handler(CommandHandler("threads", cmd_threads), group=-1)
+    _app.add_handler(CommandHandler("settings", cmd_settings), group=-1)
 
     # Callbacks
     _app.add_handler(CallbackQueryHandler(callback_apply, pattern=r"^apply:"))

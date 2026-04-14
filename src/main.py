@@ -16,6 +16,7 @@ BOT_COMMANDS = [
     BotCommand("last", "Последние 5 вакансий"),
     BotCommand("inbox", "Непрочитанные сообщения"),
     BotCommand("threads", "Активные переписки"),
+    BotCommand("settings", "Настройки поиска и профиль"),
 ]
 
 
