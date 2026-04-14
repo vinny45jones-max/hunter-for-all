@@ -166,6 +166,23 @@ def _profile_exists() -> bool:
     return os.path.exists(settings.candidate_profile_path)
 
 
+BOT_COMMANDS = [
+    BotCommand("start", "Показать справку"),
+    BotCommand("stats", "Статистика"),
+    BotCommand("search", "Запустить парсинг сейчас"),
+    BotCommand("last", "Последние 5 вакансий"),
+    BotCommand("inbox", "Непрочитанные сообщения"),
+    BotCommand("threads", "Активные переписки"),
+    BotCommand("settings", "Настройки поиска и профиль"),
+]
+
+
+async def _set_menu_for_chat(bot, chat_id: int):
+    """Показать меню команд только конкретному юзеру после онбординга."""
+    from telegram import BotCommandScopeChat
+    await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeChat(chat_id))
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if await database.is_user_registered(chat_id):
@@ -393,6 +410,9 @@ async def onboard_confirm_go(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(
         "Профиль сохранён! Запускаю первый поиск..."
     )
+
+    # Показываем меню команд только после онбординга
+    await _set_menu_for_chat(query.message.get_bot(), query.message.chat_id)
 
     from src import pipeline
     await pipeline.run_pipeline()

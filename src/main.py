@@ -3,21 +3,9 @@ import signal
 from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import BotCommand
 
 from src.config import settings, log
 from src import database, pipeline, bot
-
-
-BOT_COMMANDS = [
-    BotCommand("start", "Показать справку"),
-    BotCommand("stats", "Статистика"),
-    BotCommand("search", "Запустить парсинг сейчас"),
-    BotCommand("last", "Последние 5 вакансий"),
-    BotCommand("inbox", "Непрочитанные сообщения"),
-    BotCommand("threads", "Активные переписки"),
-    BotCommand("settings", "Настройки поиска и профиль"),
-]
 
 
 async def main():
@@ -55,7 +43,8 @@ async def main():
 
     log.info("Starting Telegram polling...")
     await app.initialize()
-    await app.bot.set_my_commands(BOT_COMMANDS)
+    # Команды меню не ставим глобально — только per-chat после онбординга
+    await app.bot.delete_my_commands()
     await app.start()
     await app.updater.start_polling()
 
