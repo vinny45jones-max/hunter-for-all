@@ -25,6 +25,7 @@ ONBOARD_RESUME = 10
 ONBOARD_EMAIL = 11
 ONBOARD_PASSWORD = 12
 ONBOARD_CONFIRM = 13
+ONBOARD_RESTART_CONFIRM = 14
 
 # Settings states
 SETTINGS_MENU = 20
@@ -166,24 +167,79 @@ def _profile_exists() -> bool:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if _profile_exists():
+    chat_id = str(update.effective_chat.id)
+    if await database.is_user_registered(chat_id):
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Продолжить", callback_data="onboard_continue"),
+            InlineKeyboardButton("Начать заново", callback_data="onboard_restart"),
+        ]])
         await update.message.reply_text(
-            "Rabota Hunter Bot\n\n"
-            "Команды:\n"
-            "/stats - статистика\n"
-            "/search - запустить парсинг сейчас\n"
-            "/last - последние 5 вакансий\n"
-            "/inbox - непрочитанные сообщения\n"
-            "/threads - активные переписки\n"
-            "/settings - настройки профиля"
+            "Ты уже зарегистрирован. Продолжить или сбросить настройки и пройти онбординг заново?",
+            reply_markup=keyboard,
         )
-        return ConversationHandler.END
+        return ONBOARD_RESTART_CONFIRM
 
     await update.message.reply_text(
         "Привет! Я помогу автоматизировать поиск работы на rabota.by.\n\n"
         "Для начала загрузите своё резюме (PDF или DOCX)."
     )
     return ONBOARD_RESUME
+
+
+async def onboard_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Продолжаем. Команды:\n"
+        "/stats - статистика\n"
+        "/search - запустить парсинг сейчас\n"
+        "/last - последние 5 вакансий\n"
+        "/inbox - непрочитанные сообщения\n"
+        "/threads - активные переписки\n"
+        "/settings - настройки профиля"
+    )
+    return ConversationHandler.END
+
+
+async def onboard_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Да, сбросить", callback_data="onboard_restart_yes"),
+        InlineKeyboardButton("Отмена", callback_data="onboard_restart_no"),
+    ]])
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Это удалит твои настройки, профиль и сохранённую сессию rabota.by. Продолжить?",
+        reply_markup=keyboard,
+    )
+    return ONBOARD_RESTART_CONFIRM
+
+
+async def onboard_restart_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat_id)
+    telegram_id = update.effective_user.id if update.effective_user else None
+
+    from src import browser_pool
+    await database.wipe_user(chat_id, telegram_id=telegram_id)
+    browser_pool.wipe_session(chat_id)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Настройки сброшены. Загрузите своё резюме (PDF или DOCX) для онбординга."
+    )
+    return ONBOARD_RESUME
+
+
+async def onboard_restart_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text("Отменено. Пользуйся ботом как раньше.")
+    return ConversationHandler.END
 
 
 async def onboard_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1137,6 +1193,12 @@ def create_app() -> Application:
                 CommandHandler("start", cmd_start),
             ],
             states={
+                ONBOARD_RESTART_CONFIRM: [
+                    CallbackQueryHandler(onboard_continue, pattern=r"^onboard_continue$"),
+                    CallbackQueryHandler(onboard_restart, pattern=r"^onboard_restart$"),
+                    CallbackQueryHandler(onboard_restart_yes, pattern=r"^onboard_restart_yes$"),
+                    CallbackQueryHandler(onboard_restart_no, pattern=r"^onboard_restart_no$"),
+                ],
                 ONBOARD_RESUME: [
                     MessageHandler(filters.Document.ALL, onboard_resume),
                 ],

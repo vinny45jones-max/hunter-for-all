@@ -504,6 +504,26 @@ async def get_all_registered_chats() -> List[str]:
     return [row[0] for row in rows]
 
 
+async def wipe_user(chat_id: str | int, telegram_id: int | None = None) -> None:
+    """Удалить все настройки и запись в users для чата (re-registration)."""
+    cid = str(chat_id)
+    async with aiosqlite.connect(_db_path) as db:
+        await db.execute("DELETE FROM user_settings WHERE chat_id=?", (cid,))
+        if telegram_id is not None:
+            await db.execute("DELETE FROM users WHERE telegram_id=?", (telegram_id,))
+        await db.commit()
+
+
+async def is_user_registered(chat_id: str | int) -> bool:
+    cid = str(chat_id)
+    async with aiosqlite.connect(_db_path) as db:
+        row = await (await db.execute(
+            "SELECT 1 FROM user_settings WHERE chat_id=? AND key='candidate_name' LIMIT 1",
+            (cid,),
+        )).fetchone()
+    return row is not None
+
+
 async def init_user_defaults(chat_id: str):
     """Заполнить дефолтные настройки для нового юзера."""
     defaults = {

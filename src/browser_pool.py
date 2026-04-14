@@ -100,6 +100,14 @@ async def acquire(chat_id: str | int, save_on_exit: bool = True):
                 await context.close()
 
 
+def wipe_session(chat_id: str | int) -> None:
+    """Удалить сохранённый storage_state для chat_id (re-registration)."""
+    import shutil
+    folder = os.path.join(settings.sessions_dir, str(chat_id))
+    if os.path.isdir(folder):
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 async def close():
     global _browser, _playwright
     if _browser and _browser.is_connected():
