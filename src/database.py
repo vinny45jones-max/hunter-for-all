@@ -1,3 +1,4 @@
+import json
 import aiosqlite
 from typing import List, Optional
 
@@ -65,6 +66,17 @@ async def init():
                 value TEXT NOT NULL,
                 updated_at TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (chat_id, key)
+            );
+
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id INTEGER PRIMARY KEY,
+                email TEXT,
+                password TEXT,
+                profile TEXT,
+                keywords TEXT,
+                min_score INTEGER DEFAULT 6,
+                onboarded INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS conversations (
@@ -494,3 +506,59 @@ async def init_user_defaults(chat_id: str):
                 (str(chat_id), key, value),
             )
         await db.commit()
+
+
+# ── Users (онбординг) ──────────────────────────────────────
+
+
+async def get_user(telegram_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE telegram_id=?", (telegram_id,)
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    user = dict(row)
+    if user.get("profile"):
+        user["profile"] = json.loads(user["profile"])
+    return user
+
+
+_USER_COLUMNS = {"email", "password", "profile", "keywords", "min_score", "onboarded"}
+
+
+async def save_user(telegram_id: int, **fields) -> None:
+    if "profile" in fields and isinstance(fields["profile"], dict):
+        fields["profile"] = json.dumps(fields["profile"], ensure_ascii=False)
+    bad_keys = set(fields) - _USER_COLUMNS
+    if bad_keys:
+        raise ValueError(f"Недопустимые поля: {bad_keys}")
+    async with aiosqlite.connect(_db_path) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)", (telegram_id,)
+        )
+        for key, value in fields.items():
+            await db.execute(
+                f"UPDATE users SET {key}=? WHERE telegram_id=?", (value, telegram_id)
+            )
+        await db.commit()
+
+
+async def update_user(telegram_id: int, **fields) -> None:
+    if "profile" in fields and isinstance(fields["profile"], dict):
+        fields["profile"] = json.dumps(fields["profile"], ensure_ascii=False)
+    bad_keys = set(fields) - _USER_COLUMNS
+    if bad_keys:
+        raise ValueError(f"Недопустимые поля: {bad_keys}")
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [telegram_id]
+    async with aiosqlite.connect(_db_path) as db:
+        await db.execute(f"UPDATE users SET {sets} WHERE telegram_id=?", vals)
+        await db.commit()
+
+
+async def is_onboarded(telegram_id: int) -> bool:
+    user = await get_user(telegram_id)
+    return bool(user and user.get("onboarded"))

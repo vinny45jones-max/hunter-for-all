@@ -30,10 +30,17 @@ async def run_pipeline_for_user(chat_id: str):
     try:
         await bot.send_text(chat_id, "🔍 Начинаю поиск вакансий...")
 
-        # 1. Скрапинг
-        all_vacancies = await scraper.parse_all_keywords()
+        # 1. Настройки юзера
+        user_queries = await database.get_setting(chat_id, "search_queries", settings.search_queries)
+        user_keywords = [q.strip() for q in user_queries.split(",") if q.strip()]
+        user_max_pages = await database.get_setting_int(chat_id, "max_pages", settings.max_pages)
 
-        # 2. Дедупликация
+        # 2. Скрапинг
+        all_vacancies = await scraper.parse_all_keywords(
+            keywords=user_keywords, max_pages=user_max_pages
+        )
+
+        # 3. Дедупликация
         new_vacancies = await database.filter_new(all_vacancies)
         if not new_vacancies:
             log.info(f"Pipeline [{chat_id}]: no new vacancies")
@@ -121,7 +128,7 @@ async def run_pipeline_for_user(chat_id: str):
 
         # 8. Лог
         await database.save_search_log(
-            query=",".join(settings.search_keywords),
+            query=",".join(user_keywords),
             total=len(all_vacancies),
             new=len(new_vacancies),
             relevant=len(relevant),

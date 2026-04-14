@@ -1,41 +1,17 @@
 import os
 from typing import Tuple
 
-from playwright.async_api import async_playwright, Browser
-
 from src.config import settings, log
-from src.inbox import INBOX_SELECTORS
-
-_browser: Browser = None
-
-
-async def _get_browser() -> Browser:
-    global _browser
-    if _browser is None or not _browser.is_connected():
-        pw = await async_playwright().start()
-        from src.scraper import _detect_chrome_channel
-        channel = _detect_chrome_channel()
-        launch_kwargs = dict(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
-        if channel:
-            launch_kwargs["channel"] = channel
-        _browser = await pw.chromium.launch(**launch_kwargs)
-    return _browser
+from src import browser_pool
 
 
 async def send_reply(conversation_id: str, text: str) -> Tuple[bool, str]:
-    browser = await _get_browser()
+    browser = await browser_pool.get_browser()
     storage_state = settings.session_path if os.path.exists(settings.session_path) else None
 
     context = await browser.new_context(
         storage_state=storage_state,
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        user_agent=browser_pool.USER_AGENT,
     )
     page = await context.new_page()
 
@@ -60,10 +36,9 @@ async def send_reply(conversation_id: str, text: str) -> Tuple[bool, str]:
 
         # Найти поле ввода ответа
         textarea = await page.query_selector(
-            INBOX_SELECTORS.get("reply_textarea", "")
-            + ", textarea[name='text'], textarea[data-qa='message-input']"
-            + ", div[contenteditable='true']"
-            + ", textarea"
+            "textarea[name='text'], textarea[data-qa='message-input']"
+            ", div[contenteditable='true']"
+            ", textarea"
         )
 
         if not textarea:
@@ -81,9 +56,8 @@ async def send_reply(conversation_id: str, text: str) -> Tuple[bool, str]:
 
         # Нажать «Отправить»
         send_btn = await page.query_selector(
-            INBOX_SELECTORS.get("reply_send_button", "")
-            + ", button[data-qa='message-submit'], button:has-text('Отправить')"
-            + ", button[type='submit']"
+            "button[data-qa='message-submit'], button:has-text('Отправить')"
+            ", button[type='submit']"
         )
 
         if not send_btn:

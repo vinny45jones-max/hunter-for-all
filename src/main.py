@@ -88,8 +88,8 @@ async def main():
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
-    from src import scraper
-    await scraper.close()
+    from src import browser_pool
+    await browser_pool.close()
     log.info("Shutdown complete")
 
 

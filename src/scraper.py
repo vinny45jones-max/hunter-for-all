@@ -1,14 +1,12 @@
 import asyncio
-import os
 import random
 import re
 from typing import List, Optional
 from urllib.parse import urljoin
 
-from playwright.async_api import async_playwright, Browser, Page, Playwright
-
 from src.config import settings, log
 from src.models import Vacancy
+from src import browser_pool
 
 # CSS-селекторы rabota.by — проверены debug_selectors.py на live-сайте
 SELECTORS = {
@@ -24,43 +22,6 @@ SELECTORS = {
 
 BASE_URL = "https://rabota.by"
 
-_browser: Optional[Browser] = None
-_playwright: Optional[Playwright] = None
-
-
-def _detect_chrome_channel() -> Optional[str]:
-    """На Windows/macOS используем системный Chrome, на Linux (Docker) — Playwright Chromium."""
-    if os.name == "nt":
-        # Windows: проверить наличие Chrome
-        for path in [
-            os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
-        ]:
-            if os.path.exists(path):
-                return "chrome"
-    return None  # Linux/Docker — используем Playwright Chromium
-
-
-async def get_browser() -> Browser:
-    global _browser, _playwright
-    if _browser is None or not _browser.is_connected():
-        if _playwright is None:
-            _playwright = await async_playwright().start()
-        channel = _detect_chrome_channel()
-        launch_kwargs = dict(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-        if channel:
-            launch_kwargs["channel"] = channel
-            log.info(f"Using system Chrome (channel={channel})")
-        _browser = await _playwright.chromium.launch(**launch_kwargs)
-    return _browser
 
 
 async def _random_delay(min_sec: float = 2.0, max_sec: float = 5.0):
@@ -84,13 +45,9 @@ async def parse_search_results(keyword: str, max_pages: int = None) -> List[Vaca
     if max_pages is None:
         max_pages = settings.max_pages
 
-    browser = await get_browser()
+    browser = await browser_pool.get_browser()
     context = await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        user_agent=browser_pool.USER_AGENT,
         viewport={"width": 1920, "height": 1080},
     )
     page = await context.new_page()
@@ -176,13 +133,9 @@ async def get_full_description(url: str) -> Optional[str]:
     if "hh.ru" in url:
         return None
 
-    browser = await get_browser()
+    browser = await browser_pool.get_browser()
     context = await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        user_agent=browser_pool.USER_AGENT,
     )
     page = await context.new_page()
     try:
@@ -208,12 +161,17 @@ async def get_full_description(url: str) -> Optional[str]:
         await context.close()
 
 
-async def parse_all_keywords() -> List[Vacancy]:
+async def parse_all_keywords(
+    keywords: List[str] = None,
+    max_pages: int = None,
+) -> List[Vacancy]:
+    if keywords is None:
+        keywords = settings.search_keywords
     all_vacancies: List[Vacancy] = []
     seen_ids = set()
 
-    for keyword in settings.search_keywords:
-        vacancies = await parse_search_results(keyword)
+    for keyword in keywords:
+        vacancies = await parse_search_results(keyword, max_pages=max_pages)
         for v in vacancies:
             if v.external_id not in seen_ids:
                 seen_ids.add(v.external_id)
@@ -224,11 +182,3 @@ async def parse_all_keywords() -> List[Vacancy]:
     return all_vacancies
 
 
-async def close():
-    global _browser, _playwright
-    if _browser and _browser.is_connected():
-        await _browser.close()
-    _browser = None
-    if _playwright is not None:
-        await _playwright.stop()
-        _playwright = None

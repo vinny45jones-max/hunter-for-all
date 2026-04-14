@@ -187,10 +187,8 @@ async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    await update.message.reply_text("Запускаю парсинг...")
     from src import pipeline
     await pipeline.run_pipeline_for_user(chat_id)
-    await update.message.reply_text("Парсинг завершён.")
 
 
 async def cmd_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
