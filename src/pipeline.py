@@ -2,7 +2,7 @@ import asyncio
 import random
 
 from src.config import settings, log
-from src import database, scraper, ai_filter, bot, inbox
+from src import database, scraper, ai_filter, bot, inbox, browser_pool, auth
 
 # Стоп-слова — вакансии с этими словами в названии отсекаются сразу
 STOP_WORDS = [
@@ -29,6 +29,18 @@ async def run_pipeline_for_user(chat_id: str):
 
     try:
         await bot.send_text(chat_id, "🔍 Начинаю поиск вакансий...")
+
+        # 0. Логин
+        try:
+            async with browser_pool.acquire(chat_id) as ctx:
+                await auth.ensure_logged_in(ctx, chat_id)
+        except auth.LoginError as e:
+            log.warning(f"Pipeline [{chat_id}]: login failed: {e}")
+            await bot.send_text(
+                chat_id,
+                "❌ Не смог войти в rabota.by. Проверь креды в /settings.",
+            )
+            return
 
         # 1. Настройки юзера
         user_queries = await database.get_setting(chat_id, "search_queries", settings.search_queries)
@@ -169,6 +181,17 @@ async def check_messages_for_user(chat_id: str):
     log.info(f"Inbox [{chat_id}]: checking messages...")
 
     try:
+        try:
+            async with browser_pool.acquire(chat_id) as ctx:
+                await auth.ensure_logged_in(ctx, chat_id)
+        except auth.LoginError as e:
+            log.warning(f"Inbox [{chat_id}]: login failed: {e}")
+            await bot.send_text(
+                chat_id,
+                "❌ Не смог войти в rabota.by. Проверь креды в /settings.",
+            )
+            return
+
         new_messages = await inbox.check_inbox(chat_id)
 
         for msg in new_messages:

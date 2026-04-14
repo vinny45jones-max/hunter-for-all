@@ -1,15 +1,14 @@
 import os
 from typing import Tuple
 
-from src.config import settings, log
+from src.config import log
 from src.models import Vacancy
 from src.scraper import SELECTORS
-from src import browser_pool
+from src import browser_pool, auth
 
 
 async def _check_auth(page) -> bool:
     try:
-        # Проверить наличие элемента авторизованного пользователя
         el = await page.query_selector(
             "[data-qa='mainmenu_myResumes'], "
             ".applicant-sidebar, "
@@ -18,48 +17,6 @@ async def _check_auth(page) -> bool:
         return el is not None
     except Exception:
         return False
-
-
-async def _reauth(page):
-    log.info("Session expired, re-authenticating...")
-    await page.goto("https://rabota.by/account/login", wait_until="networkidle")
-
-    # Новый флоу rabota.by: выбрать тип → войти → почта → email → пароль
-    # 1. Выбрать "Я ищу работу"
-    await page.click("text=Я ищу работу", timeout=10000)
-    await page.wait_for_timeout(1000)
-
-    # 2. Нажать "Войти"
-    await page.click('button[data-qa="submit-button"]', timeout=5000)
-    await page.wait_for_timeout(2000)
-
-    # 3. Переключиться на "Почта"
-    await page.click("text=Почта", timeout=5000)
-    await page.wait_for_timeout(1000)
-
-    # 4. Ввести email
-    email_input = await page.wait_for_selector(
-        '[data-qa="applicant-login-input-email"]', timeout=5000,
-    )
-    await email_input.fill(settings.rabota_email)
-
-    # 5. "Войти с паролем"
-    await page.click("text=Войти с паролем", timeout=5000)
-    await page.wait_for_timeout(2000)
-
-    # 6. Ввести пароль
-    password_input = await page.wait_for_selector(
-        '[data-qa="applicant-login-input-password"]', timeout=5000,
-    )
-    await password_input.fill(settings.rabota_password)
-
-    # 7. Отправить форму
-    await page.click('button[data-qa="submit-button"]', timeout=5000)
-    await page.wait_for_load_state("networkidle")
-
-    # Сохранить обновлённую сессию
-    await page.context.storage_state(path=settings.session_path)
-    log.info("Re-authentication complete, session saved")
 
 
 async def apply_to_vacancy(vacancy: Vacancy, chat_id: str | int) -> Tuple[bool, str]:
@@ -71,7 +28,8 @@ async def apply_to_vacancy(vacancy: Vacancy, chat_id: str | int) -> Tuple[bool, 
 
             # Проверить авторизацию
             if not await _check_auth(page):
-                await _reauth(page)
+                log.info(f"Apply [{chat_id}]: session expired, re-authenticating")
+                await auth.ensure_logged_in(page.context, chat_id)
                 await page.goto(vacancy.url, wait_until="networkidle", timeout=30000)
 
             # Проверить что вакансия не закрыта
