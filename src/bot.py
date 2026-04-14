@@ -257,6 +257,32 @@ async def onboard_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пароль не может быть пустым. Введите пароль:")
         return ONBOARD_PASSWORD
 
+    # Тестовый логин на rabota.by перед сохранением
+    from src import auth
+    email = context.user_data["onboard_email"]
+    chat_id = str(update.effective_chat.id)
+
+    attempts = context.user_data.get("onboard_pw_attempts", 0) + 1
+    context.user_data["onboard_pw_attempts"] = attempts
+
+    await update.message.reply_text("Проверяю логин на rabota.by...")
+    ok = await auth.try_login(chat_id, email, password)
+    if not ok:
+        if attempts >= 3:
+            context.user_data.pop("onboard_pw_attempts", None)
+            context.user_data.pop("onboard_password", None)
+            await update.message.reply_text(
+                "Не удалось войти 3 раза подряд. Онбординг отменён, попробуйте /start."
+            )
+            return ConversationHandler.END
+        left = 3 - attempts
+        await update.message.reply_text(
+            f"Не удалось войти — неверный пароль или rabota.by недоступна. "
+            f"Попыток осталось: {left}. Введите пароль ещё раз:"
+        )
+        return ONBOARD_PASSWORD
+
+    context.user_data.pop("onboard_pw_attempts", None)
     context.user_data["onboard_password"] = password
 
     profile_data = context.user_data["onboard_profile"]
@@ -444,6 +470,33 @@ async def settings_save_password(update: Update, context: ContextTypes.DEFAULT_T
         return SETTINGS_PASSWORD
 
     cid = str(update.effective_chat.id)
+    email = await database.get_setting(cid, "rabota_email")
+    if not email:
+        await update.message.reply_text(
+            "Сначала задайте email rabota.by в /settings."
+        )
+        return ConversationHandler.END
+
+    from src import auth
+    attempts = context.user_data.get("settings_pw_attempts", 0) + 1
+    context.user_data["settings_pw_attempts"] = attempts
+
+    await update.message.reply_text("Проверяю логин на rabota.by...")
+    ok = await auth.try_login(cid, email, password)
+    if not ok:
+        if attempts >= 3:
+            context.user_data.pop("settings_pw_attempts", None)
+            await update.message.reply_text(
+                "Не удалось войти 3 раза подряд. Пароль не сохранён."
+            )
+            return ConversationHandler.END
+        left = 3 - attempts
+        await update.message.reply_text(
+            f"Не удалось войти. Попыток осталось: {left}. Введите пароль ещё раз:"
+        )
+        return SETTINGS_PASSWORD
+
+    context.user_data.pop("settings_pw_attempts", None)
     await database.set_setting(cid, "rabota_password", password)
     await update.message.reply_text("Пароль обновлён.")
     return ConversationHandler.END

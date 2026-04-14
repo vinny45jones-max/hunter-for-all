@@ -81,6 +81,29 @@ async def _perform_login(page: Page, email: str, password: str) -> None:
     await page.wait_for_load_state("networkidle")
 
 
+async def try_login(chat_id: str | int, email: str, password: str) -> bool:
+    """Тестовый логин с заданными кредами — для онбординга и смены пароля.
+
+    Берёт контекст через browser_pool.acquire, выполняет _perform_login,
+    при успехе сохраняет storage_state для chat_id.
+    Возвращает True/False. Исключения браузера — подавляются и логируются.
+    """
+    try:
+        async with browser_pool.acquire(chat_id) as context:
+            page = await context.new_page()
+            try:
+                await _perform_login(page, email, password)
+                if not await _is_authorised(page):
+                    return False
+                await browser_pool.save_context(context, chat_id)
+                return True
+            finally:
+                await page.close()
+    except Exception as e:
+        log.warning(f"auth.try_login failed for chat_id={chat_id}: {e}")
+        return False
+
+
 async def ensure_logged_in(context: BrowserContext, chat_id: str | int) -> None:
     """Гарантирует авторизованную сессию для chat_id.
 
