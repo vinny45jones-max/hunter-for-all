@@ -23,11 +23,12 @@ def _passes_stop_words(title: str) -> bool:
     return not any(word in title_lower for word in STOP_WORDS)
 
 
-async def run_pipeline():
-    log.info("Pipeline: starting vacancy scan...")
+async def run_pipeline_for_user(chat_id: str):
+    """Запуск пайплайна для одного юзера."""
+    log.info(f"Pipeline [{chat_id}]: starting vacancy scan...")
 
     try:
-        await bot.send_text("🔍 Начинаю поиск вакансий...")
+        await bot.send_text(chat_id, "🔍 Начинаю поиск вакансий...")
 
         # 1. Скрапинг
         all_vacancies = await scraper.parse_all_keywords()
@@ -35,34 +36,35 @@ async def run_pipeline():
         # 2. Дедупликация
         new_vacancies = await database.filter_new(all_vacancies)
         if not new_vacancies:
-            log.info("Pipeline: no new vacancies")
-            await bot.send_text("Новых вакансий не найдено.")
+            log.info(f"Pipeline [{chat_id}]: no new vacancies")
+            await bot.send_text(chat_id, "Новых вакансий не найдено.")
             return
 
-        log.info(f"Pipeline: {len(new_vacancies)} new vacancies found")
+        log.info(f"Pipeline [{chat_id}]: {len(new_vacancies)} new vacancies found")
 
         # 3. Стоп-слова фильтр
         before_stop = len(new_vacancies)
         new_vacancies = [v for v in new_vacancies if _passes_stop_words(v.title)]
         filtered_out = before_stop - len(new_vacancies)
         if filtered_out:
-            log.info(f"Pipeline: стоп-слова отсекли {filtered_out} вакансий")
+            log.info(f"Pipeline [{chat_id}]: стоп-слова отсекли {filtered_out} вакансий")
 
         if not new_vacancies:
-            await bot.send_text("Новых подходящих вакансий не найдено (все отсечены стоп-словами).")
+            await bot.send_text(chat_id, "Новых подходящих вакансий не найдено (все отсечены стоп-словами).")
             return
 
         await bot.send_text(
+            chat_id,
             f"Найдено {len(all_vacancies)} вакансий, {len(new_vacancies)} новых "
             f"(отсечено стоп-словами: {filtered_out}). Быстрая оценка..."
         )
 
         # 4. Батч-оценка по названиям (быстрая, без описаний)
         try:
-            batch_scores = await ai_filter.batch_evaluate_titles(new_vacancies)
+            batch_scores = await ai_filter.batch_evaluate_titles(new_vacancies, chat_id)
         except Exception as e:
-            log.error(f"Pipeline: батч-оценка упала: {e}")
-            await bot.send_text(f"⚠️ Ошибка AI при быстрой оценке: {e}")
+            log.error(f"Pipeline [{chat_id}]: батч-оценка упала: {e}")
+            await bot.send_text(chat_id, f"⚠️ Ошибка AI при быстрой оценке: {e}")
             return
         promising = []
         for i, v in enumerate(new_vacancies):
@@ -71,17 +73,16 @@ async def run_pipeline():
             if score >= BATCH_THRESHOLD:
                 promising.append(v)
             else:
-                # Сохранить отсечённые с низким баллом
                 v.relevance_reason = f"Быстрая оценка: {score}"
                 await database.save_vacancy(v)
 
-        log.info(f"Pipeline: батч-оценка — {len(promising)} перспективных из {len(new_vacancies)}")
+        log.info(f"Pipeline [{chat_id}]: батч-оценка — {len(promising)} перспективных из {len(new_vacancies)}")
 
         if not promising:
-            await bot.send_text("После быстрой оценки подходящих вакансий не найдено.")
+            await bot.send_text(chat_id, "После быстрой оценки подходящих вакансий не найдено.")
             return
 
-        await bot.send_text(f"Перспективных: {len(promising)}. Загружаю описания...")
+        await bot.send_text(chat_id, f"Перспективных: {len(promising)}. Загружаю описания...")
 
         # 5. Загрузить описания только для перспективных
         for v in promising:
@@ -89,14 +90,14 @@ async def run_pipeline():
                 v.description = await scraper.get_full_description(v.url)
                 await asyncio.sleep(random.uniform(1, 2))
             except Exception as e:
-                log.warning(f"Pipeline: failed to get description for {v.url}: {e}")
+                log.warning(f"Pipeline [{chat_id}]: failed to get description for {v.url}: {e}")
 
         # 6. Полная AI-оценка с описанием + cover letter (один вызов)
-        min_score = await database.get_setting_int("min_relevance_score", settings.min_relevance_score)
-        await bot.send_text(f"Оцениваю {len(promising)} вакансий с описаниями...")
+        min_score = await database.get_setting_int(chat_id, "min_relevance_score", settings.min_relevance_score)
+        await bot.send_text(chat_id, f"Оцениваю {len(promising)} вакансий с описаниями...")
         for v in promising:
             try:
-                result = await ai_filter.evaluate_and_cover(v, min_score)
+                result = await ai_filter.evaluate_and_cover(v, chat_id, min_score)
                 v.relevance_score = result["score"]
                 v.relevance_reason = result["reason"]
 
@@ -104,8 +105,8 @@ async def run_pipeline():
                     v.cover_letter = result["cover_letter"]
                     v.status = "filtered"
             except Exception as e:
-                log.warning(f"Pipeline: AI filter error for {v.title}: {e}")
-                await bot.send_text(f"⚠️ Ошибка AI для «{v.title}»: {type(e).__name__}")
+                log.warning(f"Pipeline [{chat_id}]: AI filter error for {v.title}: {e}")
+                await bot.send_text(chat_id, f"⚠️ Ошибка AI для «{v.title}»: {type(e).__name__}")
 
             await database.save_vacancy(v)
 
@@ -113,10 +114,10 @@ async def run_pipeline():
         relevant = [v for v in promising if v.status == "filtered"]
         for v in relevant:
             try:
-                await bot.send_vacancy_card(v)
+                await bot.send_vacancy_card(chat_id, v)
                 await database.update_status(v.id, "sent_to_tg")
             except Exception as e:
-                log.error(f"Pipeline: TG send error for {v.title}: {e}")
+                log.error(f"Pipeline [{chat_id}]: TG send error for {v.title}: {e}")
 
         # 8. Лог
         await database.save_search_log(
@@ -127,33 +128,44 @@ async def run_pipeline():
         )
 
         log.info(
-            f"Pipeline: done. "
+            f"Pipeline [{chat_id}]: done. "
             f"Total={len(all_vacancies)}, new={len(new_vacancies)}, "
             f"promising={len(promising)}, relevant={len(relevant)}"
         )
         await bot.send_text(
+            chat_id,
             f"✅ Поиск завершён.\n"
             f"Всего: {len(all_vacancies)}, новых: {len(new_vacancies)}, "
             f"перспективных: {len(promising)}, подходящих: {len(relevant)}"
         )
 
     except Exception as e:
-        log.error(f"Pipeline error: {e}")
+        log.error(f"Pipeline [{chat_id}] error: {e}")
         try:
-            await bot.send_text(f"⚠️ Ошибка пайплайна: {e}")
+            await bot.send_text(chat_id, f"⚠️ Ошибка пайплайна: {e}")
         except Exception:
             pass
 
 
-async def check_messages():
-    log.info("Inbox: checking messages...")
+async def run_pipeline():
+    """Запуск пайплайна для всех зарегистрированных юзеров."""
+    chats = await database.get_all_registered_chats()
+    if not chats:
+        log.info("Pipeline: нет зарегистрированных юзеров")
+        return
+    for chat_id in chats:
+        await run_pipeline_for_user(chat_id)
+
+
+async def check_messages_for_user(chat_id: str):
+    """Проверка входящих сообщений для одного юзера."""
+    log.info(f"Inbox [{chat_id}]: checking messages...")
 
     try:
         new_messages = await inbox.check_inbox()
 
         for msg in new_messages:
             try:
-                # Связать с вакансией
                 vacancy = None
                 if msg.company and msg.vacancy_title:
                     vacancy = await database.find_vacancy_by_company_title(
@@ -162,7 +174,6 @@ async def check_messages():
                     if vacancy:
                         msg.vacancy_id = vacancy.id
 
-                # Сохранить conversation
                 from src.models import Conversation
                 conv = Conversation(
                     conversation_id=msg.conversation_id or msg.message_id,
@@ -173,22 +184,29 @@ async def check_messages():
                 )
                 await database.save_conversation(conv)
 
-                # Сохранить сообщение
                 saved = await database.save_incoming_message(msg)
                 if saved is None:
-                    continue  # Дубликат
+                    continue
 
-                # Отправить в Telegram
-                await bot.send_message_card(msg, vacancy)
+                await bot.send_message_card(chat_id, msg, vacancy)
 
             except Exception as e:
-                log.warning(f"Inbox: error processing message: {e}")
+                log.warning(f"Inbox [{chat_id}]: error processing message: {e}")
                 continue
 
         if new_messages:
-            log.info(f"Inbox: {len(new_messages)} new messages processed")
+            log.info(f"Inbox [{chat_id}]: {len(new_messages)} new messages processed")
         else:
-            log.info("Inbox: no new messages")
+            log.info(f"Inbox [{chat_id}]: no new messages")
 
     except Exception as e:
-        log.error(f"Inbox check error: {e}")
+        log.error(f"Inbox [{chat_id}] check error: {e}")
+
+
+async def check_messages():
+    """Проверка сообщений для всех зарегистрированных юзеров."""
+    chats = await database.get_all_registered_chats()
+    if not chats:
+        return
+    for chat_id in chats:
+        await check_messages_for_user(chat_id)

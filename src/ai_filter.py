@@ -105,10 +105,10 @@ REPLY_PROMPT = """
 """
 
 
-async def _get_candidate_info() -> tuple[str, str]:
-    """Возвращает (candidate_name, candidate_profile) из БД."""
-    name = await database.get_setting("candidate_name", "Кандидат")
-    profile = await database.get_setting("candidate_profile", "Профиль не заполнен")
+async def get_candidate_info(chat_id: str) -> tuple[str, str]:
+    """Возвращает (candidate_name, candidate_profile) из БД для конкретного юзера."""
+    name = await database.get_setting(chat_id, "candidate_name", "Кандидат")
+    profile = await database.get_setting(chat_id, "candidate_profile", "Профиль не заполнен")
     return name, profile
 
 
@@ -139,10 +139,10 @@ def _parse_json(text: str) -> dict:
     raise ValueError(f"Cannot parse JSON from: {text[:200]}")
 
 
-async def batch_evaluate_titles(vacancies: List[Vacancy], batch_size: int = 30) -> dict[int, int]:
+async def batch_evaluate_titles(vacancies: List[Vacancy], chat_id: str, batch_size: int = 30) -> dict[int, int]:
     """Быстрая оценка по названию+компания батчами. Возвращает {index: score}."""
     all_scores = {}
-    candidate_name, candidate_profile = await _get_candidate_info()
+    candidate_name, candidate_profile = await get_candidate_info(chat_id)
 
     for start in range(0, len(vacancies), batch_size):
         batch = vacancies[start:start + batch_size]
@@ -184,9 +184,9 @@ async def batch_evaluate_titles(vacancies: List[Vacancy], batch_size: int = 30) 
     return all_scores
 
 
-async def evaluate_and_cover(vacancy: Vacancy, min_score: int = 60) -> dict:
+async def evaluate_and_cover(vacancy: Vacancy, chat_id: str, min_score: int = 60) -> dict:
     """Оценка + cover letter в одном вызове. Возвращает {score, reason, cover_letter}."""
-    candidate_name, candidate_profile = await _get_candidate_info()
+    candidate_name, candidate_profile = await get_candidate_info(chat_id)
 
     req_block = ""
     if hasattr(vacancy, '_requirements') and vacancy._requirements:
@@ -227,10 +227,11 @@ async def evaluate_and_cover(vacancy: Vacancy, min_score: int = 60) -> dict:
 
 async def generate_cover_letter(
     vacancy: Vacancy,
+    chat_id: str,
     requirements: List[str] | None = None,
     version: int = 1,
 ) -> str:
-    candidate_name, candidate_profile = await _get_candidate_info()
+    candidate_name, candidate_profile = await get_candidate_info(chat_id)
 
     req_block = ""
     if requirements:
@@ -299,8 +300,9 @@ async def improve_cover_letter(
 async def generate_reply(
     vacancy: Vacancy,
     history: List[Message],
+    chat_id: str,
 ) -> str:
-    candidate_name, candidate_profile = await _get_candidate_info()
+    candidate_name, candidate_profile = await get_candidate_info(chat_id)
 
     history_text = "\n".join(
         f"{'[Работодатель]' if m.direction == 'incoming' else '[Вы]'}: {m.text}"

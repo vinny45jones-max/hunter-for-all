@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # Telegram
     telegram_bot_token: str
-    telegram_chat_id: str
+    telegram_chat_id: str = ""  # опционально, бот мультитенантный
 
     # Claude API
     anthropic_api_key: str

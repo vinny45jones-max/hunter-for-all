@@ -147,7 +147,7 @@ def _parse_requirements(vacancy: Vacancy) -> List[str]:
 
 # ── Основные операции ────────────────────────────────────────────────
 
-async def start_cover_letter(vacancy_id: int) -> dict:
+async def start_cover_letter(vacancy_id: int, chat_id: str = None) -> dict:
     """
     Начать процесс: извлечь требования, сгенерировать письмо, перейти в previewing.
 
@@ -178,7 +178,7 @@ async def start_cover_letter(vacancy_id: int) -> dict:
     # Генерация письма
     version = await database.increment_cover_letter_version(vacancy_id)
     letter = await ai_filter.generate_cover_letter(
-        vacancy, requirements=requirements, version=version
+        vacancy, chat_id=chat_id, requirements=requirements, version=version
     )
 
     # Сохранить письмо и перейти в previewing
@@ -194,7 +194,7 @@ async def start_cover_letter(vacancy_id: int) -> dict:
     }
 
 
-async def regenerate_cover_letter(vacancy_id: int) -> dict:
+async def regenerate_cover_letter(vacancy_id: int, chat_id: str = None) -> dict:
     """Сгенерировать новый вариант письма (другой ракурс)."""
     vacancy = await database.get_vacancy(vacancy_id)
     if not vacancy:
@@ -204,7 +204,7 @@ async def regenerate_cover_letter(vacancy_id: int) -> dict:
     version = await database.increment_cover_letter_version(vacancy_id)
 
     letter = await ai_filter.generate_cover_letter(
-        vacancy, requirements=requirements, version=version
+        vacancy, chat_id=chat_id, requirements=requirements, version=version
     )
     await database.update_apply_state(
         vacancy_id, "previewing", cover_letter=letter

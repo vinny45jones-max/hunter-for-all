@@ -60,9 +60,11 @@ async def init():
             );
 
             CREATE TABLE IF NOT EXISTS user_settings (
-                key TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                key TEXT NOT NULL,
                 value TEXT NOT NULL,
-                updated_at TEXT DEFAULT (datetime('now'))
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (chat_id, key)
             );
 
             CREATE TABLE IF NOT EXISTS conversations (
@@ -94,38 +96,24 @@ async def init():
                 await db.execute(f"ALTER TABLE vacancies ADD COLUMN {col_name} {col_def}")
                 log.info(f"Migrated: added column vacancies.{col_name}")
         await db.commit()
-    # Дефолтные настройки (только если таблица пустая)
+    # Миграция user_settings: старая схема без chat_id → новая с chat_id
     async with aiosqlite.connect(_db_path) as db:
-        count = (await (await db.execute("SELECT COUNT(*) FROM user_settings")).fetchone())[0]
-        if count == 0:
-            defaults = {
-                "min_relevance_score": str(settings.min_relevance_score),
-                "max_pages": str(settings.max_pages),
-                "search_city": settings.search_city,
-                "search_queries": settings.search_queries,
-                "scrape_interval_minutes": str(settings.scrape_interval_minutes),
-                "message_check_interval_minutes": str(settings.message_check_interval_minutes),
-                "max_applies_per_day": str(settings.max_applies_per_day),
-                "candidate_name": "Роман Комолов",
-                "candidate_profile": (
-                    "Director of Business Development | Commercial Transformation & AI Integration Specialist\n"
-                    "15+ лет управленческого опыта на позициях CEO, COO, CCO, коммерческий директор\n"
-                    "Отрасли: B2B оптовая торговля, дистрибуция, производство, ритейл, e-commerce\n"
-                    "Масштаб: компании $2M—$60M, команды 25—150 чел\n"
-                    "Компетенции: Business Development, P&L, AI-интеграция, CRM, Change Management\n"
-                    "Результаты: +25-40% рост прибыли, экспортные контракты $15M, рост выручки в 3-4x\n"
-                    "Образование: MBA (РАНХиГС), БГУ\n"
-                    "Языки: русский (родной), английский (C1-C2), польский (свободно)\n"
-                    "Локация: Минск, Беларусь | Варшава, Польша"
-                ),
-            }
-            for key, value in defaults.items():
-                await db.execute(
-                    "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?, ?)",
-                    (key, value),
+        cursor = await db.execute("PRAGMA table_info(user_settings)")
+        cols = {row[1] for row in await cursor.fetchall()}
+        if "chat_id" not in cols:
+            # Старая таблица — пересоздаём
+            await db.execute("DROP TABLE IF EXISTS user_settings")
+            await db.execute("""
+                CREATE TABLE user_settings (
+                    chat_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (chat_id, key)
                 )
+            """)
             await db.commit()
-            log.info("Default user_settings populated")
+            log.info("Migrated: user_settings recreated with chat_id")
 
     log.info("Database initialized")
 
@@ -441,16 +429,16 @@ async def get_active_conversations() -> List[Conversation]:
 
 # ─── User Settings ─────────────────────────────
 
-async def get_setting(key: str, default: str = None) -> Optional[str]:
+async def get_setting(chat_id: str, key: str, default: str = None) -> Optional[str]:
     async with aiosqlite.connect(_db_path) as db:
         row = await (await db.execute(
-            "SELECT value FROM user_settings WHERE key=?", (key,)
+            "SELECT value FROM user_settings WHERE chat_id=? AND key=?", (str(chat_id), key)
         )).fetchone()
     return row[0] if row else default
 
 
-async def get_setting_int(key: str, default: int = 0) -> int:
-    val = await get_setting(key)
+async def get_setting_int(chat_id: str, key: str, default: int = 0) -> int:
+    val = await get_setting(chat_id, key)
     if val is None:
         return default
     try:
@@ -459,18 +447,50 @@ async def get_setting_int(key: str, default: int = 0) -> int:
         return default
 
 
-async def set_setting(key: str, value: str):
+async def set_setting(chat_id: str, key: str, value: str):
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(
-            "INSERT INTO user_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (key, value),
+            "INSERT INTO user_settings (chat_id, key, value, updated_at) VALUES (?, ?, ?, datetime('now')) "
+            "ON CONFLICT(chat_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (str(chat_id), key, value),
         )
         await db.commit()
 
 
-async def get_all_settings() -> dict:
+async def get_all_settings(chat_id: str) -> dict:
     async with aiosqlite.connect(_db_path) as db:
-        cursor = await db.execute("SELECT key, value FROM user_settings")
+        cursor = await db.execute(
+            "SELECT key, value FROM user_settings WHERE chat_id=?", (str(chat_id),)
+        )
         rows = await cursor.fetchall()
     return {row[0]: row[1] for row in rows}
+
+
+async def get_all_registered_chats() -> List[str]:
+    """Все chat_id у которых есть хотя бы одна настройка (зарегистрированные юзеры)."""
+    async with aiosqlite.connect(_db_path) as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT chat_id FROM user_settings WHERE key='candidate_name'"
+        )
+        rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+async def init_user_defaults(chat_id: str):
+    """Заполнить дефолтные настройки для нового юзера."""
+    defaults = {
+        "min_relevance_score": str(settings.min_relevance_score),
+        "max_pages": str(settings.max_pages),
+        "search_city": settings.search_city,
+        "search_queries": settings.search_queries,
+        "scrape_interval_minutes": str(settings.scrape_interval_minutes),
+        "message_check_interval_minutes": str(settings.message_check_interval_minutes),
+        "max_applies_per_day": str(settings.max_applies_per_day),
+    }
+    async with aiosqlite.connect(_db_path) as db:
+        for key, value in defaults.items():
+            await db.execute(
+                "INSERT OR IGNORE INTO user_settings (chat_id, key, value) VALUES (?, ?, ?)",
+                (str(chat_id), key, value),
+            )
+        await db.commit()

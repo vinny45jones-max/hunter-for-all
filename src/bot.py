@@ -103,22 +103,23 @@ def _message_keyboard(conversation_id: str, url: str = None) -> InlineKeyboardMa
 
 # ─── Send functions ──────────────────────────────
 
-async def send_vacancy_card(vacancy):
+async def send_vacancy_card(chat_id: str, vacancy):
     if not _app:
         return
     today_count = await database.count_today_applies()
-    today_left = settings.max_applies_per_day - today_count
+    max_applies = await database.get_setting_int(chat_id, "max_applies_per_day", 10)
+    today_left = max_applies - today_count
     text = _vacancy_card_text(vacancy, today_left=today_left)
     keyboard = _vacancy_keyboard(vacancy.id, vacancy.url)
     await _app.bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=chat_id,
         text=text,
         reply_markup=keyboard,
         parse_mode="MarkdownV2",
     )
 
 
-async def send_message_card(msg, vacancy=None):
+async def send_message_card(chat_id: str, msg, vacancy=None):
     if not _app:
         return
     text = _message_card_text(msg)
@@ -126,18 +127,18 @@ async def send_message_card(msg, vacancy=None):
     url = f"https://rabota.by/applicant/responses/{conv_id}" if conv_id else None
     keyboard = _message_keyboard(conv_id, url)
     await _app.bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=chat_id,
         text=text,
         reply_markup=keyboard,
         parse_mode="MarkdownV2",
     )
 
 
-async def send_text(text: str):
+async def send_text(chat_id: str, text: str):
     if not _app:
         return
     await _app.bot.send_message(
-        chat_id=settings.telegram_chat_id,
+        chat_id=chat_id,
         text=text,
     )
 
@@ -185,9 +186,10 @@ async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
     await update.message.reply_text("Запускаю парсинг...")
     from src import pipeline
-    await pipeline.run_pipeline()
+    await pipeline.run_pipeline_for_user(chat_id)
     await update.message.reply_text("Парсинг завершён.")
 
 
@@ -232,7 +234,8 @@ EDITABLE_SETTINGS = {
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    all_settings = await database.get_all_settings()
+    chat_id = str(update.effective_chat.id)
+    all_settings = await database.get_all_settings(chat_id)
 
     lines = ["*Настройки*\n"]
     for key, label in EDITABLE_SETTINGS.items():
@@ -268,8 +271,9 @@ async def callback_set_setting(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     key = query.data.split(":", 1)[1]
+    chat_id = str(query.message.chat_id)
 
-    current = await database.get_setting(key, "—")
+    current = await database.get_setting(chat_id, key, "—")
     label = EDITABLE_SETTINGS.get(key, key)
 
     if key == "candidate_profile":
@@ -292,6 +296,7 @@ async def receive_setting_value(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Нет активной настройки для редактирования.")
         return ConversationHandler.END
 
+    chat_id = str(update.effective_chat.id)
     value = update.message.text.strip()
 
     # Валидация числовых настроек
@@ -304,7 +309,7 @@ async def receive_setting_value(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("Нужно число. Попробуй ещё раз через /settings.")
             return ConversationHandler.END
 
-    await database.set_setting(key, value)
+    await database.set_setting(chat_id, key, value)
     label = EDITABLE_SETTINGS.get(key, key)
     await update.message.reply_text(f"Сохранено: {label} = {value}")
     return ConversationHandler.END
@@ -350,10 +355,12 @@ async def callback_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     vacancy_id = int(query.data.split(":")[1])
 
+    chat_id = str(query.message.chat_id)
+    max_applies = await database.get_setting_int(chat_id, "max_applies_per_day", 10)
     today_count = await database.count_today_applies()
-    if today_count >= settings.max_applies_per_day:
+    if today_count >= max_applies:
         await query.message.reply_text(
-            f"Лимит откликов на сегодня ({settings.max_applies_per_day}) исчерпан."
+            f"Лимит откликов на сегодня ({max_applies}) исчерпан."
         )
         return
 
@@ -367,7 +374,7 @@ async def callback_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("Генерирую сопроводительное письмо...")
 
     try:
-        result = await cover_flow.start_cover_letter(vacancy_id)
+        result = await cover_flow.start_cover_letter(vacancy_id, chat_id=chat_id)
     except ValueError as e:
         await query.message.reply_text(f"Ошибка: {e}")
         return
@@ -379,7 +386,7 @@ async def callback_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     keyboard = _cover_preview_keyboard(vacancy_id)
 
-    today_left = settings.max_applies_per_day - today_count
+    today_left = max_applies - today_count
     footer = f"\n\n📊 Осталось откликов сегодня: {today_left}"
 
     await query.message.reply_text(
@@ -512,7 +519,8 @@ async def callback_cover_regen(update: Update, context: ContextTypes.DEFAULT_TYP
     vacancy_id = int(query.data.split(":")[1])
 
     try:
-        result = await cover_flow.regenerate_cover_letter(vacancy_id)
+        chat_id = str(query.message.chat_id)
+        result = await cover_flow.regenerate_cover_letter(vacancy_id, chat_id=chat_id)
     except ValueError as e:
         await query.message.reply_text(f"Ошибка: {e}")
         return
@@ -592,7 +600,8 @@ async def callback_ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = await database.get_conversation_history(conversation_id)
     vacancy = await database.get_vacancy_by_conversation(conversation_id)
 
-    ai_text = await ai_filter.generate_reply(vacancy, history)
+    chat_id = str(query.message.chat_id)
+    ai_text = await ai_filter.generate_reply(vacancy, history, chat_id)
     if not ai_text:
         await query.message.reply_text("Не удалось сгенерировать ответ.")
         return
