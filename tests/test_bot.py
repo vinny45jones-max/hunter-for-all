@@ -146,12 +146,16 @@ class TestCreateApp:
 
     def test_handlers_include_commands(self):
         app = create_app()
-        from telegram.ext import CommandHandler
-        cmd_handlers = [
-            h for group in app.handlers.values()
-            for h in group
-            if isinstance(h, CommandHandler)
-        ]
+        from telegram.ext import CommandHandler, ConversationHandler
+        cmd_handlers = []
+        for group in app.handlers.values():
+            for h in group:
+                if isinstance(h, CommandHandler):
+                    cmd_handlers.append(h)
+                elif isinstance(h, ConversationHandler):
+                    for ep in h.entry_points:
+                        if isinstance(ep, CommandHandler):
+                            cmd_handlers.append(ep)
         commands = set()
         for h in cmd_handlers:
             commands.update(h.commands)

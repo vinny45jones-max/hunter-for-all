@@ -1,6 +1,9 @@
+import json
+import os
 import re
 import warnings
 
+import yaml
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
 )
@@ -10,12 +13,18 @@ from telegram.ext import (
 )
 
 from src.config import settings, log
-from src import database, ai_filter, cover_flow
+from src import database, ai_filter, cover_flow, resume_parser
 
 # ConversationHandler states
 WAITING_REPLY = 1
 WAITING_COVER_TEXT = 2
 WAITING_SETTING_VALUE = 3
+
+# Onboarding states
+ONBOARD_RESUME = 10
+ONBOARD_EMAIL = 11
+ONBOARD_PASSWORD = 12
+ONBOARD_CONFIRM = 13
 
 _app: Application = None
 
@@ -145,17 +154,209 @@ async def send_text(chat_id: str, text: str):
 
 # ─── Command handlers ───────────────────────────
 
+def _profile_exists() -> bool:
+    return os.path.exists(settings.candidate_profile_path)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _profile_exists():
+        await update.message.reply_text(
+            "Rabota Hunter Bot\n\n"
+            "Команды:\n"
+            "/stats - статистика\n"
+            "/search - запустить парсинг сейчас\n"
+            "/last - последние 5 вакансий\n"
+            "/inbox - непрочитанные сообщения\n"
+            "/threads - активные переписки\n"
+            "/settings - настройки профиля"
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
-        "Rabota Hunter Bot\n\n"
-        "Команды:\n"
-        "/stats - статистика\n"
-        "/search - запустить парсинг сейчас\n"
-        "/last - последние 5 вакансий\n"
-        "/inbox - непрочитанные сообщения\n"
-        "/threads - активные переписки\n"
-        "/settings - настройки поиска и профиль"
+        "Привет! Я помогу автоматизировать поиск работы на rabota.by.\n\n"
+        "Для начала загрузите своё резюме (PDF или DOCX)."
     )
+    return ONBOARD_RESUME
+
+
+async def onboard_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc:
+        await update.message.reply_text(
+            "Отправьте файл резюме (PDF или DOCX)."
+        )
+        return ONBOARD_RESUME
+
+    filename = doc.file_name or ""
+    if not filename.lower().endswith((".pdf", ".docx")):
+        await update.message.reply_text(
+            "Неподдерживаемый формат. Отправьте PDF или DOCX."
+        )
+        return ONBOARD_RESUME
+
+    await update.message.reply_text("Анализирую резюме...")
+
+    try:
+        tg_file = await doc.get_file()
+        file_bytes = await tg_file.download_as_bytearray()
+        profile = await resume_parser.parse_resume(bytes(file_bytes), filename)
+    except Exception as e:
+        log.error("onboard_resume error: %s", e)
+        await update.message.reply_text(
+            f"Не удалось обработать файл: {e}\nПопробуйте другой файл."
+        )
+        return ONBOARD_RESUME
+
+    context.user_data["onboard_profile"] = {
+        "candidate_name": profile.name,
+        "candidate_profile": profile.summary,
+        "search_keywords": profile.search_keywords,
+    }
+
+    await update.message.reply_text(
+        f"Профиль извлечён:\n"
+        f"Имя: {profile.name}\n"
+        f"Специализация: {profile.title}\n"
+        f"Ключевые слова: {', '.join(profile.search_keywords)}\n\n"
+        "Теперь введите email от аккаунта rabota.by:"
+    )
+    return ONBOARD_EMAIL
+
+
+async def onboard_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    email = update.message.text.strip()
+    if "@" not in email:
+        await update.message.reply_text("Введите корректный email:")
+        return ONBOARD_EMAIL
+
+    context.user_data["onboard_email"] = email
+    await update.message.reply_text(
+        "Введите пароль от rabota.by:\n"
+        "(сообщение будет удалено сразу после получения)"
+    )
+    return ONBOARD_PASSWORD
+
+
+async def onboard_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    password = update.message.text.strip()
+
+    # удаляем сообщение с паролем
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if not password:
+        await update.message.reply_text("Пароль не может быть пустым. Введите пароль:")
+        return ONBOARD_PASSWORD
+
+    context.user_data["onboard_password"] = password
+
+    profile_data = context.user_data["onboard_profile"]
+    keywords = ", ".join(profile_data["search_keywords"])
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Начать поиск", callback_data="onboard_go"),
+            InlineKeyboardButton("Изменить слова", callback_data="onboard_edit_kw"),
+        ],
+    ])
+
+    await update.message.reply_text(
+        f"Всё готово!\n\n"
+        f"Имя: {profile_data['candidate_name']}\n"
+        f"Email: {context.user_data['onboard_email']}\n"
+        f"Ключевые слова: {keywords}\n\n"
+        f"Начать поиск вакансий?",
+        reply_markup=keyboard,
+    )
+    return ONBOARD_CONFIRM
+
+
+async def onboard_confirm_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка 'Начать поиск' — сохраняем профиль и учётку."""
+    query = update.callback_query
+    await query.answer()
+
+    profile_data = context.user_data["onboard_profile"]
+    email = context.user_data["onboard_email"]
+    password = context.user_data["onboard_password"]
+
+    # Сохраняем profile.yml
+    profile_path = settings.candidate_profile_path
+    with open(profile_path, "w", encoding="utf-8") as f:
+        yaml.dump(profile_data, f, allow_unicode=True, default_flow_style=False)
+
+    # Сохраняем учётку в БД
+    await database.set_setting("rabota_email", email)
+    await database.set_setting("rabota_password", password)
+
+    # Сбрасываем кеш профиля в ai_filter
+    ai_filter._profile_cache = None
+
+    # Очищаем временные данные
+    context.user_data.pop("onboard_profile", None)
+    context.user_data.pop("onboard_email", None)
+    context.user_data.pop("onboard_password", None)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Профиль сохранён! Запускаю первый поиск..."
+    )
+
+    from src import pipeline
+    await pipeline.run_pipeline()
+    await query.message.reply_text("Первый поиск завершён. Используйте /stats для статистики.")
+
+    return ConversationHandler.END
+
+
+async def onboard_edit_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка 'Изменить слова' — просим ввести новые."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Введите ключевые слова для поиска через запятую:\n"
+        "(например: менеджер, директор, CEO)"
+    )
+    return ONBOARD_CONFIRM
+
+
+async def onboard_receive_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получены новые ключевые слова от пользователя."""
+    text = update.message.text.strip()
+    keywords = [kw.strip() for kw in text.split(",") if kw.strip()]
+
+    if not keywords:
+        await update.message.reply_text("Введите хотя бы одно ключевое слово:")
+        return ONBOARD_CONFIRM
+
+    context.user_data["onboard_profile"]["search_keywords"] = keywords
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Начать поиск", callback_data="onboard_go"),
+            InlineKeyboardButton("Изменить слова", callback_data="onboard_edit_kw"),
+        ],
+    ])
+
+    profile_data = context.user_data["onboard_profile"]
+    await update.message.reply_text(
+        f"Ключевые слова обновлены: {', '.join(keywords)}\n\n"
+        f"Имя: {profile_data['candidate_name']}\n"
+        f"Начать поиск?",
+        reply_markup=keyboard,
+    )
+    return ONBOARD_CONFIRM
+
+
+async def onboard_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("onboard_profile", None)
+    context.user_data.pop("onboard_email", None)
+    context.user_data.pop("onboard_password", None)
+    await update.message.reply_text("Онбординг отменён. Используйте /start чтобы начать заново.")
+    return ConversationHandler.END
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -686,6 +887,38 @@ def create_app() -> Application:
     global _app
     _app = Application.builder().token(settings.telegram_bot_token).build()
 
+    # Onboarding conversation handler
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*per_message.*", category=UserWarning)
+        onboard_conv = ConversationHandler(
+            entry_points=[
+                CommandHandler("start", cmd_start),
+            ],
+            states={
+                ONBOARD_RESUME: [
+                    MessageHandler(filters.Document.ALL, onboard_resume),
+                ],
+                ONBOARD_EMAIL: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_email),
+                ],
+                ONBOARD_PASSWORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_password),
+                ],
+                ONBOARD_CONFIRM: [
+                    CallbackQueryHandler(onboard_confirm_go, pattern=r"^onboard_go$"),
+                    CallbackQueryHandler(onboard_edit_keywords, pattern=r"^onboard_edit_kw$"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_receive_keywords),
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", onboard_cancel),
+            ],
+            per_message=False,
+            per_chat=True,
+        )
+
+    _app.add_handler(onboard_conv)
+
     # Reply conversation handler
     # per_message=False т.к. entry point — CallbackQuery, а ответ — Message
     with warnings.catch_warnings():
@@ -751,7 +984,6 @@ def create_app() -> Application:
     _app.add_handler(settings_conv)
 
     # Commands — группа -1 чтобы обрабатывались до ConversationHandler
-    _app.add_handler(CommandHandler("start", cmd_start), group=-1)
     _app.add_handler(CommandHandler("stats", cmd_stats), group=-1)
     _app.add_handler(CommandHandler("last", cmd_last), group=-1)
     _app.add_handler(CommandHandler("search", cmd_search), group=-1)
