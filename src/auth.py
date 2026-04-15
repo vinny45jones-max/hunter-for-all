@@ -47,10 +47,13 @@ async def _is_authorised(page: Page) -> bool:
         el = await page.query_selector(AUTH_MARKER_SELECTOR)
         if el is not None:
             return True
-        # Фоллбэк: ищем текстовые маркеры личного кабинета
-        for text in ("Мой профиль", "Мои резюме", "Выйти", "Откликнуться"):
-            marker = await page.query_selector(f"text={text}")
-            if marker is not None:
+        # Фоллбэк: ищем текстовые маркеры в innerText body
+        try:
+            body = (await page.inner_text("body")).lower()
+        except Exception:
+            body = ""
+        for marker in ("мой профиль", "мои резюме", "выйти", "откликнуться"):
+            if marker in body:
                 return True
         return False
     except Exception:
