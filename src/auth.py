@@ -98,9 +98,11 @@ async def _perform_login(page: Page, email: str, password: str) -> None:
     )
     await password_input.fill(password)
 
-    # 7. Submit
-    await page.click('button[data-qa="submit-button"]', timeout=5000)
+    # 7. Submit — Enter по полю пароля (надёжнее клика: на странице
+    # несколько data-qa="submit-button" от разных шагов SPA).
+    await password_input.press("Enter")
     await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_timeout(2000)
 
 
 async def try_login(chat_id: str | int, email: str, password: str) -> bool:
