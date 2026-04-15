@@ -4,6 +4,7 @@
 Креды достаются из `user_settings` (зашифрованный пароль через Fernet).
 Если в БД пусто — fallback на глобальные `settings.rabota_email`/`settings.rabota_password`.
 """
+import os
 from typing import Tuple
 
 from playwright.async_api import BrowserContext, Page
@@ -43,6 +44,27 @@ async def _is_authorised(page: Page) -> bool:
         return el is not None
     except Exception:
         return False
+
+
+async def _dump_debug(page: Page, chat_id: str | int, tag: str) -> None:
+    try:
+        debug_dir = os.path.join(os.path.dirname(settings.db_path), "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        prefix = os.path.join(debug_dir, f"login_{chat_id}_{tag}")
+        await page.screenshot(path=f"{prefix}.png", full_page=True)
+        url = page.url
+        title = await page.title()
+        body_text = ""
+        try:
+            body_text = (await page.inner_text("body"))[:500]
+        except Exception:
+            pass
+        log.warning(
+            f"auth debug [{chat_id}/{tag}] url={url} title={title!r} "
+            f"body_excerpt={body_text!r}"
+        )
+    except Exception as e:
+        log.warning(f"auth._dump_debug failed: {e}")
 
 
 async def _perform_login(page: Page, email: str, password: str) -> None:
@@ -92,8 +114,14 @@ async def try_login(chat_id: str | int, email: str, password: str) -> bool:
         async with browser_pool.acquire(chat_id) as context:
             page = await context.new_page()
             try:
-                await _perform_login(page, email, password)
+                try:
+                    await _perform_login(page, email, password)
+                except Exception as e:
+                    log.warning(f"auth._perform_login raised for chat_id={chat_id}: {e}")
+                    await _dump_debug(page, chat_id, "perform_error")
+                    return False
                 if not await _is_authorised(page):
+                    await _dump_debug(page, chat_id, "not_authorised")
                     return False
                 await browser_pool.save_context(context, chat_id)
                 return True
