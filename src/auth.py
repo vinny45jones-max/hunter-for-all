@@ -14,9 +14,11 @@ from src import browser_pool, database
 
 
 AUTH_MARKER_SELECTOR = (
+    "a[href*='/applicant/resumes'], "
+    "a[href*='/account/logout'], "
     "[data-qa='mainmenu_myResumes'], "
-    ".applicant-sidebar, "
-    "a[href*='applicant']"
+    "[data-qa='mainmenu_applicantResumes'], "
+    ".applicant-sidebar"
 )
 
 LOGIN_URL = "https://rabota.by/account/login"
@@ -40,8 +42,17 @@ async def _load_credentials(chat_id: str | int) -> Tuple[str, str]:
 
 async def _is_authorised(page: Page) -> bool:
     try:
+        if "/account/login" in page.url:
+            return False
         el = await page.query_selector(AUTH_MARKER_SELECTOR)
-        return el is not None
+        if el is not None:
+            return True
+        # Фоллбэк: ищем текстовые маркеры личного кабинета
+        for text in ("Мой профиль", "Мои резюме", "Выйти", "Откликнуться"):
+            marker = await page.query_selector(f"text={text}")
+            if marker is not None:
+                return True
+        return False
     except Exception:
         return False
 

@@ -114,6 +114,7 @@ async def test_ensure_logged_in_already_authorised():
     page = MagicMock()
     page.goto = AsyncMock()
     page.close = AsyncMock()
+    page.url = "https://rabota.by/"  # уже не на логине
     page.query_selector = AsyncMock(return_value=MagicMock())  # authorised
     context = MagicMock()
     context.new_page = AsyncMock(return_value=page)
@@ -135,12 +136,16 @@ async def test_ensure_logged_in_performs_login(init_db):
     page = MagicMock()
     page.goto = AsyncMock()
     page.close = AsyncMock()
-    # Первый вызов — не авторизован; второй (после login) — авторизован.
-    page.query_selector = AsyncMock(side_effect=[None, MagicMock()])
+    page.url = "https://rabota.by/account/login"  # не авторизован до login
+    page.query_selector = AsyncMock(return_value=MagicMock())  # marker есть
+
+    async def perform_side_effect(*args, **kwargs):
+        page.url = "https://rabota.by/"  # после login ушли с /account/login
+
     context = MagicMock()
     context.new_page = AsyncMock(return_value=page)
 
-    with patch("src.auth._perform_login", AsyncMock()) as perform, \
+    with patch("src.auth._perform_login", AsyncMock(side_effect=perform_side_effect)) as perform, \
          patch("src.auth.browser_pool.save_context", AsyncMock()) as save_ctx:
         await auth.ensure_logged_in(context, "42")
 
@@ -156,6 +161,7 @@ async def test_ensure_logged_in_raises_on_failure(init_db):
     page = MagicMock()
     page.goto = AsyncMock()
     page.close = AsyncMock()
+    page.url = "https://rabota.by/account/login"  # всегда на странице логина
     page.query_selector = AsyncMock(return_value=None)  # всегда не авторизован
     context = MagicMock()
     context.new_page = AsyncMock(return_value=page)
