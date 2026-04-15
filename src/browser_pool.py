@@ -3,10 +3,28 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Playwright
 
 from src.config import settings, log
+
+
+def _parse_proxy(url: Optional[str]) -> Optional[dict]:
+    if not url:
+        return None
+    p = urlparse(url)
+    if not p.hostname:
+        log.warning(f"Invalid PROXY_URL: {url}")
+        return None
+    scheme = p.scheme or "http"
+    port = f":{p.port}" if p.port else ""
+    proxy = {"server": f"{scheme}://{p.hostname}{port}"}
+    if p.username:
+        proxy["username"] = p.username
+    if p.password:
+        proxy["password"] = p.password
+    return proxy
 
 _browser: Optional[Browser] = None
 _playwright: Optional[Playwright] = None
@@ -48,6 +66,10 @@ async def get_browser() -> Browser:
         if channel:
             launch_kwargs["channel"] = channel
             log.info(f"Browser pool: using system Chrome (channel={channel})")
+        proxy = _parse_proxy(settings.proxy_url)
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+            log.info(f"Browser pool: using proxy {proxy['server']}")
         _browser = await _playwright.chromium.launch(**launch_kwargs)
     return _browser
 

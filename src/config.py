@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Лимиты
     max_applies_per_day: int = 10
 
+    # Прокси для Playwright (формат: http://user:pass@host:port или http://host:port)
+    proxy_url: str | None = None
+
     @property
     def search_keywords(self) -> List[str]:
         return [q.strip() for q in self.search_queries.split(",")]
