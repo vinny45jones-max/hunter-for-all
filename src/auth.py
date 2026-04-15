@@ -105,6 +105,11 @@ async def _perform_login(page: Page, email: str, password: str) -> None:
     await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     await page.wait_for_timeout(1500)
 
+    # Если сессия уже валидна — /account/login редиректит на ЛК; ничего делать не нужно.
+    if await _is_authorised(page):
+        log.info("auth: session already valid at login URL, skipping form")
+        return
+
     # 1. Опциональный role-picker "Я ищу работу" (на некоторых редизайнах отсутствует)
     if await _try_click(page, "text=Я ищу работу", timeout=3000):
         await page.wait_for_timeout(1000)
