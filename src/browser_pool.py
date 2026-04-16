@@ -118,8 +118,12 @@ async def acquire(chat_id: str | int, save_on_exit: bool = True):
             try:
                 if save_on_exit:
                     await save_context(context, chat_id)
-            finally:
+            except Exception:
+                pass
+            try:
                 await context.close()
+            except Exception:
+                pass
 
 
 def wipe_session(chat_id: str | int) -> None:
@@ -128,6 +132,44 @@ def wipe_session(chat_id: str | int) -> None:
     folder = os.path.join(settings.sessions_dir, str(chat_id))
     if os.path.isdir(folder):
         shutil.rmtree(folder, ignore_errors=True)
+
+
+async def restart():
+    """Принудительно пересоздать браузер (при сетевых ошибках)."""
+    global _browser, _playwright
+    log.warning("Browser pool: restarting browser")
+    try:
+        if _browser and _browser.is_connected():
+            await _browser.close()
+    except Exception:
+        pass
+    _browser = None
+    if _playwright is not None:
+        try:
+            await _playwright.stop()
+        except Exception:
+            pass
+        _playwright = None
+    await get_browser()
+    log.info("Browser pool: browser restarted successfully")
+
+
+NETWORK_ERRORS = (
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_CONNECTION_TIMED_OUT",
+    "ERR_NETWORK_CHANGED",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TIMED_OUT",
+    "ERR_EMPTY_RESPONSE",
+)
+
+
+def is_network_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(code in msg for code in NETWORK_ERRORS)
 
 
 async def close():

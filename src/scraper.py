@@ -49,18 +49,18 @@ async def parse_search_results(
     if max_pages is None:
         max_pages = settings.max_pages
 
-    vacancies: List[Vacancy] = []
-
-    async with browser_pool.acquire(chat_id) as context:
-        page = await context.new_page()
+    for attempt in range(2):
+        vacancies: List[Vacancy] = []
         try:
-            search_url = f"{BASE_URL}/search/vacancy?text={keyword}&area={settings.search_area_id}"
-            log.info(f"Scraping: {keyword} -> {search_url}")
+            async with browser_pool.acquire(chat_id) as context:
+                page = await context.new_page()
+                search_url = f"{BASE_URL}/search/vacancy?text={keyword}&area={settings.search_area_id}"
+                log.info(f"Scraping: {keyword} -> {search_url}")
 
-            for page_num in range(max_pages):
-                url = f"{search_url}&page={page_num}"
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await _random_delay(1.5, 3.0)
+                for page_num in range(max_pages):
+                    url = f"{search_url}&page={page_num}"
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await _random_delay(1.5, 3.0)
 
                 cards = await page.query_selector_all(SELECTORS["vacancy_card"])
                 if not cards:
@@ -119,11 +119,15 @@ async def parse_search_results(
                         break
                     await _random_delay()
 
-            log.info(f"Found {len(vacancies)} vacancies for '{keyword}'")
+                log.info(f"Found {len(vacancies)} vacancies for '{keyword}'")
+            return vacancies
         except Exception as e:
+            if attempt == 0 and browser_pool.is_network_error(e):
+                log.warning(f"Network error for '{keyword}', restarting browser: {e}")
+                await browser_pool.restart()
+                continue
             log.error(f"Scraper error for '{keyword}': {e}")
-
-    return vacancies
+            return vacancies
 
 
 async def get_full_description(url: str, chat_id: str | int) -> Optional[str]:
@@ -131,25 +135,28 @@ async def get_full_description(url: str, chat_id: str | int) -> Optional[str]:
     if "hh.ru" in url:
         return None
 
-    async with browser_pool.acquire(chat_id) as context:
-        page = await context.new_page()
+    for attempt in range(2):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await _random_delay(1.0, 2.5)
+            async with browser_pool.acquire(chat_id) as context:
+                page = await context.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await _random_delay(1.0, 2.5)
 
-            desc_el = await page.query_selector(SELECTORS["full_description"])
-            if desc_el:
-                text = await desc_el.inner_text()
-                return text.strip()
+                desc_el = await page.query_selector(SELECTORS["full_description"])
+                if desc_el:
+                    text = await desc_el.inner_text()
+                    return text.strip()
 
-            # Fallback: собрать весь текст из body
-            body = await page.query_selector("body")
-            if body:
-                text = await body.inner_text()
-                # Обрезать до разумного размера
-                return text[:5000].strip()
-            return None
+                body = await page.query_selector("body")
+                if body:
+                    text = await body.inner_text()
+                    return text[:5000].strip()
+                return None
         except Exception as e:
+            if attempt == 0 and browser_pool.is_network_error(e):
+                log.warning(f"Network error getting description, restarting browser: {e}")
+                await browser_pool.restart()
+                continue
             log.error(f"Error getting description for {url}: {e}")
             return None
 
